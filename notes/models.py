@@ -1,6 +1,8 @@
 # notes/models.py
 from django.db import models
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator, MaxValueValidator
+from decimal import Decimal, ROUND_HALF_UP
 from etudiants.models import Etudiant
 from modules.models import Module
 
@@ -37,17 +39,47 @@ class Note(models.Model):
     )
 
     # ✅ Notes
-    note_cc = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Note CC sur 20", validators=[MinValueValidator(0), MaxValueValidator(20)])
-    note_sn = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Note SN sur 20", validators=[MinValueValidator(0), MaxValueValidator(20)])
-    note_rattrapage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Note Rattrapage sur 20 (facultatif)", validators=[MinValueValidator(0), MaxValueValidator(20)])
+    # These component fields are entered on their configured maxima (e.g. CC on 30, SN on 70)
+    note_cc = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True, help_text="Note CC (échelle configurable, ex. 30)", validators=[MinValueValidator(0), MaxValueValidator(100)])
+    note_sn = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True, help_text="Note SN (échelle configurable, ex. 70)", validators=[MinValueValidator(0), MaxValueValidator(100)])
+    note_rattrapage = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True, help_text="Note Rattrapage (échelle configurable, facultatif)", validators=[MinValueValidator(0), MaxValueValidator(100)])
 
     # ✅ Calcul automatique
-    note_finale = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Note finale sur 20")
+    # note_finale is stored on a 0-100 scale
+    note_finale = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True, help_text="Note finale sur 100")
+
+    # ✅ Validation administrative
+    validee = models.BooleanField(
+        default=False,
+        help_text="Note visible par l'étudiant uniquement après validation par l'administration",
+    )
+
+    def clean(self):
+        super().clean()
+        from academique.models import ParametresGlobaux
+        params = ParametresGlobaux.get_parametres()
+        pc = params.pourcentage_cc or 0
+        psn = params.pourcentage_sn or 0
+
+        if self.note_cc is not None:
+            self.note_cc = round(self.note_cc, 2)
+            if self.note_cc > pc:
+                raise ValidationError({"note_cc": f"La note CC ne peut pas dépasser la configuration de {pc}."})
+        if self.note_sn is not None:
+            self.note_sn = round(self.note_sn, 2)
+            if self.note_sn > psn:
+                raise ValidationError({"note_sn": f"La note SN ne peut pas dépasser la configuration de {psn}."})
+        if self.note_rattrapage is not None:
+            self.note_rattrapage = round(self.note_rattrapage, 2)
+            if self.note_rattrapage > psn:
+                raise ValidationError({"note_rattrapage": f"La note de rattrapage ne peut pas dépasser la configuration de {psn}."})
 
     def save(self, *args, **kwargs):
+        self.clean()
         """
-        Calcul automatique pondéré de la note finale (sur 20) à partir des notes sur 20.
-        note_finale = (cc*%cc + sn_ou_rattrapage*%sn) / 100
+        Calcul automatique de la note finale sur 100.
+        CC et SN sont saisies directement sur leurs quotas configurés
+        (par exemple CC /30 et SN /70) : la note finale est donc leur somme.
         - Si rattrapage existe → SN remplacée par rattrapage
         """
         if self.evaluation_id:
@@ -84,27 +116,53 @@ class Note(models.Model):
             self.annee_academique_ref = self.classe.annee_academique
 
         m = self.module
-        if m and self.note_cc is not None:
+        if m and (self.note_cc is not None or self.note_sn is not None or self.note_rattrapage is not None):
             from academique.models import ParametresGlobaux
             params = ParametresGlobaux.get_parametres()
-            pc = params.pourcentage_cc
-            psn = params.pourcentage_sn
+            pc = params.pourcentage_cc or 0
+            psn = params.pourcentage_sn or 0
 
+            # Interpret component scores as entered on their configured maxima
+            # e.g. if pc=30 and psn=70 then note_cc should be 0..30 and note_sn 0..70
             sn_or_r = self.note_rattrapage if self.note_rattrapage is not None else self.note_sn
-            total = (float(self.note_cc) * pc) + (float(sn_or_r or 0) * psn)
 
-            self.note_finale = round(total / 100.0, 2)
+            try:
+                cc_val = float(self.note_cc) if self.note_cc is not None else 0.0
+            except Exception:
+                cc_val = 0.0
+            try:
+                sn_val = float(sn_or_r) if sn_or_r is not None else 0.0
+            except Exception:
+                sn_val = 0.0
+
+            # Chaque composante est déjà saisie sur son propre quota :
+            # CC / pc + SN / psn donne directement une note finale /100.
+            contrib_cc = cc_val if pc > 0 else 0.0
+            contrib_sn = sn_val if psn > 0 else 0.0
+            total = contrib_cc + contrib_sn
+            # Clamp to 0-100
+            if total < 0:
+                total = 0.0
+            if total > 100:
+                total = 100.0
+
+            self.note_finale = Decimal(str(total)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         super().save(*args, **kwargs)
 
 
     @property
     def note_sur_20(self):
-        """Retourne la note finale (déjà sur 20)"""
-        return float(self.note_finale) if self.note_finale is not None else None
+        """Retourne la note finale mise à l'échelle sur 20 (à partir de la valeur stockée sur 100)."""
+        if self.note_finale is None:
+            return None
+        try:
+            return round((float(self.note_finale) / 100.0) * 20.0, 2)
+        except Exception:
+            return None
 
     @property
     def besoin_rattrapage(self):
-        """Retourne True si la moyenne est < 9/20"""
+        """Retourne True si la note finale est inférieure à 45/100."""
         n20 = self.note_sur_20
         return (n20 is not None) and (n20 < 9)
 
@@ -112,7 +170,7 @@ class Note(models.Model):
     @classmethod
     def moyenne_etudiant(cls, etudiant, session=None):
         """
-        Calcule la moyenne générale pondérée par coefficients (sur 20).
+        Calcule la moyenne générale pondérée par coefficients (sur 100).
         - Si session est précisée → moyenne pour ce semestre uniquement.
         - Sinon → moyenne sur toutes les notes.
         """
@@ -142,13 +200,13 @@ class Note(models.Model):
         if moyenne is None:
             return "--"  # pas encore de notes
 
-        if moyenne < 10:
+        if moyenne < 50:
             return "Échec"
-        elif 10 <= moyenne < 12:
+        elif 50 <= moyenne < 60:
             return "Passable"
-        elif 12 <= moyenne < 14:
+        elif 60 <= moyenne < 70:
             return "Assez Bien"
-        elif 14 <= moyenne < 16:
+        elif 70 <= moyenne < 80:
             return "Bien"
         else:
             return "Très Bien"

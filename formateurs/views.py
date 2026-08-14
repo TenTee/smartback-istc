@@ -11,6 +11,9 @@ from .models import Formateur, CoursDocument
 from .serializers import FormateurSerializer, FormateurPortalSerializer, CoursDocumentSerializer
 
 
+EPREUVE_TYPES_A_VALIDER = {"EXAMEN", "TP", "RATTRAPAGE"}
+
+
 class FormateurListCreateView(generics.ListCreateAPIView):
     queryset = Formateur.objects.all()
     serializer_class = FormateurSerializer
@@ -414,6 +417,7 @@ class FormateurPortalViewSet(viewsets.ViewSet):
                         'note_cc': item.get('note_cc'),
                         'note_sn': item.get('note_sn'),
                         'note_rattrapage': item.get('note_rattrapage'),
+                        'validee': False,  # doit être validée par l'administration avant visibilité étudiant
                     }
                 )
                 if created:
@@ -525,6 +529,13 @@ class FormateurPortalViewSet(viewsets.ViewSet):
         if not filiere_id or not niveau_id or not annee_academique_id:
             return Response({"detail": "Impossible de determiner filiere/niveau/annee."}, status=400)
 
+        type_epreuve = str(request.data.get('type_epreuve', 'EXAMEN')).upper()
+        if type_epreuve not in dict(Epreuve.TYPE_CHOICES):
+            return Response({"detail": "Type d'épreuve invalide."}, status=status.HTTP_400_BAD_REQUEST)
+        # Les épreuves évaluatives sont toujours privées à l'import : seul
+        # l'administrateur peut ensuite les rendre visibles aux étudiants.
+        est_partage = False if type_epreuve in EPREUVE_TYPES_A_VALIDER else request.data.get('est_partage', 'false').lower() == 'true'
+
         epreuve = Epreuve.objects.create(
             nom=request.data.get('nom', ''),
             module_id=module_id,
@@ -532,9 +543,9 @@ class FormateurPortalViewSet(viewsets.ViewSet):
             niveau_id=niveau_id,
             annee_academique_id=annee_academique_id,
             semestre_id=request.data.get('semestre_id') or None,
-            type_epreuve=request.data.get('type_epreuve', 'EXAMEN'),
+            type_epreuve=type_epreuve,
             auteur=formateur.nom,
-            est_partage=request.data.get('est_partage', 'false').lower() == 'true',
+            est_partage=est_partage,
             fichier=fichier,
             corrige=corrige,
         )
@@ -557,6 +568,12 @@ class FormateurPortalViewSet(viewsets.ViewSet):
             epreuve = Epreuve.objects.get(id=epreuve_id, auteur=formateur.nom)
         except Epreuve.DoesNotExist:
             return Response({"detail": "Épreuve introuvable."}, status=404)
+
+        if epreuve.type_epreuve in EPREUVE_TYPES_A_VALIDER:
+            return Response(
+                {"detail": "Seule l'administration peut partager une épreuve d'examen, de TP ou de rattrapage."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         epreuve.est_partage = not epreuve.est_partage
         epreuve.save()

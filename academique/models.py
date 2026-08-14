@@ -42,7 +42,45 @@ class ParametresGlobaux(TimeStampedModel):
 
     def save(self, *args, **kwargs):
         self.full_clean()
+        
+        old_pc = None
+        old_psn = None
+        if self.pk:
+            try:
+                old_instance = ParametresGlobaux.objects.get(pk=self.pk)
+                old_pc = old_instance.pourcentage_cc
+                old_psn = old_instance.pourcentage_sn
+            except ParametresGlobaux.DoesNotExist:
+                pass
+
         super().save(*args, **kwargs)
+
+        # If percentages changed, recalculate all existing notes
+        if old_pc is not None and old_psn is not None:
+            if old_pc != self.pourcentage_cc or old_psn != self.pourcentage_sn:
+                from notes.models import Note
+                from decimal import Decimal
+                
+                new_pc = Decimal(str(self.pourcentage_cc))
+                new_psn = Decimal(str(self.pourcentage_sn))
+                old_pc_dec = Decimal(str(old_pc))
+                old_psn_dec = Decimal(str(old_psn))
+                
+                notes = Note.objects.all()
+                for n in notes:
+                    changed = False
+                    if n.note_cc is not None and old_pc_dec > 0:
+                        n.note_cc = (n.note_cc / old_pc_dec) * new_pc
+                        changed = True
+                    if n.note_sn is not None and old_psn_dec > 0:
+                        n.note_sn = (n.note_sn / old_psn_dec) * new_psn
+                        changed = True
+                    if n.note_rattrapage is not None and old_psn_dec > 0:
+                        n.note_rattrapage = (n.note_rattrapage / old_psn_dec) * new_psn
+                        changed = True
+                    
+                    if changed:
+                        n.save()
 
     @classmethod
     def get_parametres(cls):

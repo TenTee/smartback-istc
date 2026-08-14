@@ -13,7 +13,7 @@ from django.utils.text import get_valid_filename
 from openpyxl.styles import Font
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from emploidutemps.models import EmploiDuTemps
@@ -670,6 +670,28 @@ class EpreuveViewSet(OptimizedModelViewSet):
     filterset_fields = ("filiere", "niveau", "module", "annee_academique", "semestre", "type_epreuve", "est_partage")
     search_fields = ("nom", "auteur", "module__nom", "filiere__nom")
     ordering = ("-annee_academique__libelle", "filiere__nom", "module__nom", "nom")
+    TYPES_A_VALIDER = {"EXAMEN", "TP", "RATTRAPAGE"}
+
+    def _est_administrateur_pedagogique(self):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_superuser or getattr(user, "role", "") in ("admin", "superadmin"):
+            return True
+        try:
+            from users.models import Role
+            role = Role.objects.get(code=user.role)
+            return role.can_manage_pedagogie == "ecriture"
+        except Role.DoesNotExist:
+            return False
+
+    def _verifier_partage(self, donnees, instance=None):
+        type_epreuve = donnees.get("type_epreuve", getattr(instance, "type_epreuve", None))
+        est_partage = donnees.get("est_partage", getattr(instance, "est_partage", False))
+        if type_epreuve in self.TYPES_A_VALIDER and est_partage and not self._est_administrateur_pedagogique():
+            raise PermissionDenied(
+                "Seule l'administration peut rendre une épreuve d'examen, de TP ou de rattrapage visible aux étudiants."
+            )
 
     def get_parsers(self):
         """Support multipart (file upload) + JSON."""
@@ -678,10 +700,24 @@ class EpreuveViewSet(OptimizedModelViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        # Portail étudiant: si le paramètre student_view est présent, filtrer uniquement les épreuves partagées
-        if self.request.query_params.get('student_view') == 'true':
+        # Un étudiant ne peut voir que les épreuves rendues visibles par l'administration.
+        if getattr(self.request.user, "role", "") == "etudiant":
             queryset = queryset.filter(est_partage=True)
         return queryset
+
+    def perform_create(self, serializer):
+        type_epreuve = serializer.validated_data.get("type_epreuve", "EXAMEN")
+        if type_epreuve in self.TYPES_A_VALIDER and not self._est_administrateur_pedagogique():
+            # Le défaut historique du modèle est partagé : on l'écrase pour
+            # empêcher tout partage indirect par un formateur.
+            serializer.save(est_partage=False)
+            return
+        self._verifier_partage(serializer.validated_data)
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._verifier_partage(serializer.validated_data, serializer.instance)
+        serializer.save()
 
     @action(detail=True, methods=['get'], url_path='download-sujet')
     def download_sujet(self, request, pk=None):

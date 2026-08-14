@@ -80,6 +80,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'academique.middleware.ArchiveAcademicYearMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'academique.middleware.AcademicYearMiddleware',
@@ -207,6 +208,9 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://smart.tenteeglobal.com",
+    "https://istc.tenteeglobal.com",
+    "http://istc.tenteeglobal.com",
+    "https://istc-smartcampus.vercel.app",
 ]
 
 from corsheaders.defaults import default_headers

@@ -32,9 +32,9 @@ class StudentSituationView(APIView):
             else:
                 inscription = etudiant.inscriptions.order_by("-date_inscription").first()
             
-            # 2. Résumé des notes (via application notes)
+            # 2. Résumé des notes (via application notes) - uniquement les notes validées
             from notes.models import Note
-            notes_qs = Note.objects.filter(etudiant=etudiant)
+            notes_qs = Note.objects.filter(etudiant=etudiant, validee=True)
             if year_id:
                 notes_qs = notes_qs.filter(classe__annee_academique_id=year_id)
             
@@ -124,8 +124,8 @@ class StudentHistoryView(APIView):
                 year_id = year.id if year else None
                 
                 # Situation pour cette année spécifique
-                # 1. Notes (count only for history summary)
-                notes_qs = Note.objects.filter(etudiant=etudiant)
+                # 1. Notes (count only for history summary) - uniquement les validées
+                notes_qs = Note.objects.filter(etudiant=etudiant, validee=True)
                 if year_id:
                     notes_qs = notes_qs.filter(classe__annee_academique_id=year_id)
                 

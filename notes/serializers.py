@@ -3,8 +3,9 @@ from .models import Note
 
 
 def validate_note_max_20(value):
-    if value is not None and value > 20:
-        raise serializers.ValidationError("La note ne peut pas dépasser 20.")
+    # We allow component values up to 100 (component maxima are configurable)
+    if value is not None and value > 100:
+        raise serializers.ValidationError("La note ne peut pas dépasser 100.")
     if value is not None and value < 0:
         raise serializers.ValidationError("La note ne peut pas être négative.")
     return value
@@ -45,6 +46,7 @@ class NoteSerializer(serializers.ModelSerializer):
             "note_finale",
             "note_sur_20",
             "besoin_rattrapage",
+            "validee",
         ]
         read_only_fields = ["id", "note_finale", "session"]
 
@@ -57,8 +59,27 @@ class NoteSerializer(serializers.ModelSerializer):
     def validate_note_rattrapage(self, value):
         return validate_note_max_20(value)
 
+    def validate(self, attrs):
+        from academique.models import ParametresGlobaux
+        params = ParametresGlobaux.get_parametres()
+        pc = params.pourcentage_cc or 0
+        psn = params.pourcentage_sn or 0
+
+        cc = attrs.get("note_cc", self.instance.note_cc if self.instance else None)
+        sn = attrs.get("note_sn", self.instance.note_sn if self.instance else None)
+        r = attrs.get("note_rattrapage", self.instance.note_rattrapage if self.instance else None)
+
+        if cc is not None and cc > pc:
+            raise serializers.ValidationError({"note_cc": f"La note CC ne peut pas dépasser {pc}."})
+        if sn is not None and sn > psn:
+            raise serializers.ValidationError({"note_sn": f"La note SN ne peut pas dépasser {psn}."})
+        if r is not None and r > psn:
+            raise serializers.ValidationError({"note_rattrapage": f"La note de rattrapage ne peut pas dépasser {psn}."})
+
+        return attrs
+
     def get_note_sur_20(self, obj):
-        return float(obj.note_finale) if obj.note_finale is not None else None
+        return float(obj.note_sur_20) if obj.note_sur_20 is not None else None
 
     def get_besoin_rattrapage(self, obj):
         return obj.besoin_rattrapage
