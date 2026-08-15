@@ -141,6 +141,55 @@ class NoteViewSet(viewsets.ModelViewSet):
             "devalidees": count,
         })
 
+    @action(detail=False, methods=["get"], url_path="rattrapages")
+    def rattrapages(self, request):
+        """Liste administrative des étudiants à convoquer au rattrapage."""
+        if not _peut_valider(request.user):
+            return Response({"error": "Seul un administrateur peut consulter les rattrapages"}, status=403)
+
+        notes = self.get_queryset().filter(note_finale__isnull=False, note_finale__lt=50)
+        classe_id = request.query_params.get("classe")
+        session = request.query_params.get("session")
+        module_id = request.query_params.get("module")
+        if classe_id:
+            notes = notes.filter(classe_id=classe_id)
+        if session:
+            notes = notes.filter(session=session)
+        if module_id:
+            notes = notes.filter(module_id=module_id)
+        notes = notes.select_related("etudiant", "module", "classe").order_by(
+            "classe__nom", "etudiant__nom", "module__nom"
+        )
+
+        # Charge les salles une seule fois, puis les rattache à chaque ligne
+        # de rattrapage afin que l'export PDF reste fidèle au filtre affiché.
+        from emploidutemps.models import EmploiDuTemps
+
+        salle_map = {}
+        for classe_id, module_id, salle_nom in EmploiDuTemps.objects.filter(
+            classe_id__in=notes.values_list("classe_id", flat=True),
+            module_id__in=notes.values_list("module_id", flat=True),
+        ).values_list("classe_id", "module_id", "salle__nom"):
+            salle_map.setdefault((classe_id, module_id), set()).add(salle_nom)
+
+        return Response([
+            {
+                "note_id": note.id,
+                "etudiant_id": note.etudiant_id,
+                "etudiant_nom": note.etudiant.nom,
+                "etudiant_matricule": note.etudiant.matricule,
+                "classe_id": note.classe_id,
+                "classe_nom": note.classe.nom if note.classe else "Non affectée",
+                "salles": sorted(salle_map.get((note.classe_id, note.module_id), set())),
+                "salle_nom": ", ".join(sorted(salle_map.get((note.classe_id, note.module_id), set()))) or "Non planifiée",
+                "module_id": note.module_id,
+                "module_nom": note.module.nom,
+                "session": note.session,
+                "note_finale": float(note.note_finale),
+            }
+            for note in notes
+        ])
+
     def _notes_a_modifier(self, request):
         """Construit le queryset ciblé pour la (dé)validation à partir de la requête."""
         qs = Note.objects.all()

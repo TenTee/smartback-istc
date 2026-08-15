@@ -162,9 +162,8 @@ class Note(models.Model):
 
     @property
     def besoin_rattrapage(self):
-        """Retourne True si la note finale est inférieure à 45/100."""
-        n20 = self.note_sur_20
-        return (n20 is not None) and (n20 < 9)
+        """Retourne True si la note finale du module est inférieure à 50/100."""
+        return self.note_finale is not None and float(self.note_finale) < 50
 
     # ✅ Méthodes globales pour un étudiant
     @classmethod
