@@ -38,30 +38,35 @@ class ArchiveAcademicYearMiddleware:
 
     def __call__(self, request):
         academic_year_id = request.headers.get('X-Academic-Year')
-        if academic_year_id:
-            try:
-                year_id = int(academic_year_id)
-            except (TypeError, ValueError):
-                year_id = None
 
-            if year_id is not None:
-                from .models import AnneeAcademique
+        if not academic_year_id:
+            return self.get_response(request)
 
-                try:
-                    year = AnneeAcademique.objects.get(pk=year_id)
-                except AnneeAcademique.DoesNotExist:
-                    return JsonResponse(
-                        {'detail': 'Année académique introuvable.'},
-                        status=404,
-                    )
+        if not getattr(request.user, 'is_authenticated', False):
+            return self.get_response(request)
 
-                if not year.est_active and request.user.is_authenticated and not request.user.is_superuser:
-                    return JsonResponse(
-                        {
-                            'detail': "L'année académique sélectionnée est archivée. Seul le super-admin peut y accéder."
-                        },
-                        status=403,
-                    )
+        try:
+            year_id = int(academic_year_id)
+        except (TypeError, ValueError):
+            return self.get_response(request)
+
+        from .models import AnneeAcademique
+
+        try:
+            year = AnneeAcademique.objects.get(pk=year_id)
+        except AnneeAcademique.DoesNotExist:
+            return JsonResponse(
+                {'detail': 'Année académique introuvable.'},
+                status=404,
+            )
+
+        if not year.est_active and not request.user.is_superuser:
+            return JsonResponse(
+                {
+                    'detail': "L'année académique sélectionnée est archivée. Seul le super-admin peut y accéder."
+                },
+                status=403,
+            )
 
         return self.get_response(request)
 
