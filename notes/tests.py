@@ -1,10 +1,16 @@
 from django.test import TestCase
 from django.core.exceptions import ValidationError
+from django.urls import reverse
+from django.contrib.auth import get_user_model
+from rest_framework.test import APIClient
 from academique.models import ParametresGlobaux, UniversiteTutelle, Departement, Filiere, CycleGlobal, Cycle, Niveau, Classe, AnneeAcademique
 from etudiants.models import Etudiant, Inscription
 from modules.models import Module
 from notes.models import Note
+from users.models import Role
 from decimal import Decimal
+
+User = get_user_model()
 
 class NoteCalculationTest(TestCase):
     def setUp(self):
@@ -100,3 +106,73 @@ class NoteCalculationTest(TestCase):
         self.assertEqual(note.note_sn, Decimal('42.00'))
         # note_finale: 32 + 42 = 74
         self.assertEqual(note.note_finale, Decimal('74.00'))
+
+
+class NotePermissionTest(TestCase):
+    def test_role_lecture_cannot_create_note(self):
+        role = Role.objects.create(
+            code='lecture_only',
+            libelle='Lecture seule',
+            can_manage_pedagogie='lecture',
+            can_manage_rh='none',
+            can_manage_logistique='none',
+            can_manage_finance='none',
+            can_manage_etudiants='none',
+        )
+        user = User.objects.create_user(
+            username='lecture_user',
+            email='lecture@example.com',
+            password='pass123',
+            role=role.code,
+            noms='Lecture',
+            prenoms='User',
+        )
+
+        self.client = APIClient()
+        self.client.force_authenticate(user=user)
+
+        self.uni, _ = UniversiteTutelle.objects.get_or_create(nom='Test Uni')
+        self.dept, _ = Departement.objects.get_or_create(universite_tutelle=self.uni, nom='Test Dept')
+        self.filiere, _ = Filiere.objects.get_or_create(departement=self.dept, nom='Test Filiere')
+        self.cg, _ = CycleGlobal.objects.get_or_create(nom='Test Cycle Global')
+        self.cycle, _ = Cycle.objects.get_or_create(filiere=self.filiere, type_cycle=self.cg, nom='Test Cycle')
+        self.niveau, _ = Niveau.objects.get_or_create(cycle=self.cycle, nom='Test Niveau')
+        self.annee, _ = AnneeAcademique.objects.get_or_create(libelle='2025-2026', defaults={'est_active': True})
+        self.classe, _ = Classe.objects.get_or_create(
+            filiere=self.filiere,
+            cycle=self.cycle,
+            niveau=self.niveau,
+            annee_academique=self.annee,
+            defaults={'nom': 'Test Classe'}
+        )
+        self.module, _ = Module.objects.get_or_create(nom='Test Module', defaults={'coefficient': 2})
+        self.etudiant = Etudiant.objects.create(
+            email='student2@test.com',
+            nom='Student Two',
+            contact='123456',
+            filiere=self.filiere,
+            statut='Inscrit'
+        )
+        Inscription.objects.create(
+            etudiant=self.etudiant,
+            classe=self.classe,
+            niveau=self.niveau,
+            annee_academique='2025-2026',
+            annee_academique_ref=self.annee,
+        )
+
+        response = self.client.post(
+            '/api/notes/',
+            {
+                'etudiant': self.etudiant.id,
+                'module': self.module.id,
+                'classe': self.classe.id,
+                'session': 'Semestre 1',
+                'note_cc': 12,
+                'note_sn': 40,
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Note.objects.filter(etudiant=self.etudiant).count(), 0)

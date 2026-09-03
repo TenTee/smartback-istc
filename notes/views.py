@@ -13,6 +13,8 @@ from academique.models import (
 )
 from .serializers import NoteSerializer, NoteSummarySerializer, NoteFiliereSerializer
 from academique.middleware import get_current_academic_year_id
+from users.permissions import user_has_write_access
+from rest_framework.exceptions import PermissionDenied
 
 
 def _to_decimal(value):
@@ -100,6 +102,9 @@ class NoteViewSet(viewsets.ModelViewSet):
         return NoteSerializer
 
     def perform_create(self, serializer):
+        if not user_has_write_access(self.request.user, 'can_manage_pedagogie'):
+            raise PermissionDenied("Accès refusé : ce rôle n'a pas les droits d'écriture sur la pédagogie.")
+
         # Une note enregistrée n'est pas visible par l'étudiant tant qu'un
         # administrateur ne l'a pas validée.
         if not _peut_valider(self.request.user):
@@ -108,6 +113,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             serializer.save()
 
     def perform_update(self, serializer):
+        if not user_has_write_access(self.request.user, 'can_manage_pedagogie'):
+            raise PermissionDenied("Accès refusé : ce rôle n'a pas les droits d'écriture sur la pédagogie.")
+
         # Toute modification d'une note la rend à nouveau non visible tant
         # qu'elle n'est pas re-validée par l'administration.
         if not _peut_valider(self.request.user):
@@ -115,9 +123,16 @@ class NoteViewSet(viewsets.ModelViewSet):
         else:
             serializer.save()
 
+    def perform_destroy(self, instance):
+        if not user_has_write_access(self.request.user, 'can_manage_pedagogie'):
+            raise PermissionDenied("Accès refusé : ce rôle n'a pas les droits d'écriture sur la pédagogie.")
+        instance.delete()
+
     @action(detail=False, methods=["post"], url_path="valider")
     def valider(self, request):
         """Valide des notes (les rend visibles par les étudiants). Admin uniquement."""
+        if not user_has_write_access(request.user, 'can_manage_pedagogie'):
+            raise PermissionDenied("Accès refusé : ce rôle n'a pas les droits d'écriture sur la pédagogie.")
         if not _peut_valider(request.user):
             return Response({"error": "Seul un administrateur peut valider les notes"}, status=403)
 
@@ -131,6 +146,8 @@ class NoteViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="devalider")
     def devalider(self, request):
         """Dévalide des notes (les masque aux étudiants). Admin uniquement."""
+        if not user_has_write_access(request.user, 'can_manage_pedagogie'):
+            raise PermissionDenied("Accès refusé : ce rôle n'a pas les droits d'écriture sur la pédagogie.")
         if not _peut_valider(request.user):
             return Response({"error": "Seul un administrateur peut dévalider les notes"}, status=403)
 
@@ -547,6 +564,9 @@ class NoteViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="batch-save")
     def batch_save(self, request):
+        if not user_has_write_access(request.user, 'can_manage_pedagogie'):
+            raise PermissionDenied("Accès refusé : ce rôle n'a pas les droits d'écriture sur la pédagogie.")
+
         notes_data = request.data.get("notes", [])
         if not notes_data:
             return Response({"error": "Aucune donnée fournie"}, status=400)
