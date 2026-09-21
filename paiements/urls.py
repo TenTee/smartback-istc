@@ -1,6 +1,8 @@
-from django.urls import path
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
 
 from .views import (
+    BourseViewSet,
     ClassePaymentScheduleDetailView,
     ClassePaymentScheduleListCreateView,
     FilierePaymentPolicyDetailView,
@@ -11,13 +13,19 @@ from .views import (
     PaiementDetail,
     PaiementListCreate,
     PaymentAlertListView,
+    ReductionEtudiantViewSet,
     StudentPaymentPlanDetailView,
     StudentPaymentPlanListCreateView,
     StudentResolvedScheduleView,
     StudentScheduleOverrideView,
 )
 
+router = DefaultRouter()
+router.register(r"bourses", BourseViewSet, basename="bourse")
+router.register(r"reductions-etudiants", ReductionEtudiantViewSet, basename="reduction-etudiant")
+
 urlpatterns = [
+    path("", include(router.urls)),
     path("paiements/me/", MePaiementSummary.as_view(), name="paiement-me"),
     path("paiements/dashboard/", FinancialDashboardView.as_view(), name="financial-dashboard"),
     path("paiements/", PaiementListCreate.as_view(), name="paiement-list"),
@@ -33,3 +41,4 @@ urlpatterns = [
     path("paiements/student-schedule/<int:etudiant_id>/", StudentResolvedScheduleView.as_view(), name="student-resolved-schedule"),
     path("paiements/student-schedule/<int:etudiant_id>/override/", StudentScheduleOverrideView.as_view(), name="student-schedule-override"),
 ]
+

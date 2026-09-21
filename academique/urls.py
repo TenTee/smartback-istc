@@ -17,6 +17,7 @@ from .views import (
     EpreuveViewSet,
     EvaluationViewSet,
     FiliereViewSet,
+    SpecialiteViewSet,
     FraisViewSet,
     LevelViewSet,
     ParametresGlobauxViewSet,
@@ -31,6 +32,7 @@ router.register(r"configuration-etablissement", ConfigurationEtablissementViewSe
 router.register(r"universites-tutelles", UniversiteTutelleViewSet, basename="academique-universite-tutelle")
 router.register(r"departements", DepartementViewSet, basename="academique-departement")
 router.register(r"filieres", FiliereViewSet, basename="academique-filiere")
+router.register(r"specialites", SpecialiteViewSet, basename="academique-specialite")
 router.register(r"cycles-globaux", CycleGlobalViewSet, basename="academique-cycle-global")
 router.register(r"cycles", CycleViewSet, basename="academique-cycle")
 router.register(r"niveaux", LevelViewSet, basename="academique-niveau")

@@ -2,14 +2,17 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from .models import (
+    Bourse,
     ClassePaymentInstallment,
     ClassePaymentSchedule,
     FiliereInstallmentTemplate,
     FilierePaymentPolicy,
     Paiement,
+    ReductionEtudiant,
     StudentPaymentInstallment,
     StudentPaymentPlan,
 )
+
 
 
 class FiliereInstallmentTemplateSerializer(serializers.ModelSerializer):
@@ -196,6 +199,11 @@ class PaiementAggregatedSerializer(serializers.Serializer):
     montant_paye_formation_total = serializers.DecimalField(max_digits=10, decimal_places=2)
     solde_restant_formation = serializers.DecimalField(max_digits=10, decimal_places=2)
     derniere_date = serializers.DateTimeField(allow_null=True)
+    type_reduction = serializers.CharField(required=False, allow_blank=True, default="NONE")
+    type_reduction_display = serializers.CharField(required=False, allow_blank=True, default="")
+    montant_reduction = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0)
+    bourse_code = serializers.CharField(required=False, allow_blank=True, default="")
+
 
 
 class PaymentAlertSerializer(serializers.Serializer):
@@ -255,3 +263,47 @@ class ResolvedScheduleSerializer(serializers.Serializer):
     is_overdue = serializers.BooleanField()
     overdue_amount = serializers.DecimalField(max_digits=10, decimal_places=2)
     overdue_days = serializers.IntegerField()
+
+
+class BourseSerializer(serializers.ModelSerializer):
+    etudiant_nom = serializers.CharField(source="etudiant_beneficiaire.nom", read_only=True)
+
+    class Meta:
+        model = Bourse
+        fields = [
+            "id",
+            "code",
+            "description",
+            "montant",
+            "est_utilisee",
+            "etudiant_beneficiaire",
+            "etudiant_nom",
+            "date_utilisation",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at", "etudiant_nom"]
+
+
+class ReductionEtudiantSerializer(serializers.ModelSerializer):
+    etudiant_nom = serializers.CharField(source="etudiant.nom", read_only=True)
+    bourse_code = serializers.CharField(source="bourse.code", read_only=True)
+    type_display = serializers.CharField(source="get_type_reduction_display", read_only=True)
+
+    class Meta:
+        model = ReductionEtudiant
+        fields = [
+            "id",
+            "etudiant",
+            "etudiant_nom",
+            "type_reduction",
+            "type_display",
+            "target",
+            "montant_reduction",
+            "bourse",
+            "bourse_code",
+            "motif",
+            "created_at",
+        ]
+        read_only_fields = ["created_at", "etudiant_nom", "bourse_code", "type_display"]
+

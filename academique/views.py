@@ -3,8 +3,9 @@ import traceback
 from decimal import Decimal
 
 import openpyxl
-from django.db import transaction
+from django.db import models, transaction
 from django.http import HttpResponse, FileResponse
+
 from django.conf import settings
 import os
 from django.utils import timezone
@@ -34,6 +35,7 @@ from .models import (
     Epreuve,
     Evaluation,
     Filiere,
+    Specialite,
     Niveau,
     ParametresGlobaux,
     PreInscription,
@@ -57,6 +59,7 @@ from .serializers import (
     EpreuveSerializer,
     EvaluationSerializer,
     FiliereSerializer,
+    SpecialiteSerializer,
     FraisSerializer,
     LevelSerializer,
     ParametresGlobauxSerializer,
@@ -73,8 +76,6 @@ class OptimizedModelViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
 
-        # Ne pas filtrer par année académique pour les actions destructrices/modificatrices
-        # afin d'éviter les 404 sur des objets existants mais d'une autre année
         if self.action in ('destroy', 'retrieve', 'update', 'partial_update', 'reject', 'approve'):
             return queryset
 
@@ -83,21 +84,15 @@ class OptimizedModelViewSet(viewsets.ModelViewSet):
         if not year_id:
             return queryset
 
-        # Mapping des champs pour filtrer par année académique selon le modèle
         model = self.queryset.model
         model_name = model.__name__
 
-        # 1. Filtre direct
         if hasattr(model, 'annee_academique_id') and not model_name == "Inscription":
             queryset = queryset.filter(annee_academique_id=year_id)
         elif hasattr(model, 'annee_academique_ref_id'):
             queryset = queryset.filter(annee_academique_ref_id=year_id)
-
-        # 2. Filtre via relation (Classe)
         elif hasattr(model, 'classe_id'):
             queryset = queryset.filter(classe__annee_academique_id=year_id)
-
-        # 3. Cas spécifiques (Paiement)
         elif model_name == "Paiement":
             queryset = queryset.filter(frais__classe__annee_academique_id=year_id)
 
@@ -105,15 +100,10 @@ class OptimizedModelViewSet(viewsets.ModelViewSet):
 
 
 class ParametresGlobauxViewSet(viewsets.ModelViewSet):
-    """
-    ViewSet to manage ParametresGlobaux. 
-    Since it's a singleton, list returns a single object and create is limited.
-    """
     queryset = ParametresGlobaux.objects.all()
     serializer_class = ParametresGlobauxSerializer
 
     def get_queryset(self):
-        # Assure qu'on retourne au moins un objet s'il n'y en a pas
         ParametresGlobaux.get_parametres()
         return ParametresGlobaux.objects.all()
 
@@ -128,7 +118,6 @@ class ConfigurationEtablissementViewSet(viewsets.ModelViewSet):
         return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
-        # Assure qu'on retourne au moins un objet
         ConfigurationEtablissement.get_config()
         return ConfigurationEtablissement.objects.all()
 
@@ -162,21 +151,11 @@ class FiliereViewSet(OptimizedModelViewSet):
     ordering = ("departement__nom", "nom")
 
     def get_permissions(self):
-        # Allow public access to list/retrieve filieres and the nested cycles action
-        if self.action in ["list", "retrieve", "cycles"]:
+        if self.action in ["list", "retrieve", "cycles", "specialites"]:
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
 
     def create(self, request, *args, **kwargs):
-        """
-        Extended create to optionally accept:
-        - `type_cycle`: id of CycleGlobal to create a Cycle for this filière
-        - `nombre_niveaux`: integer number of levels to create under the cycle
-        - `responsable_nom`: name of the responsible person (stored on Filiere)
-
-        When provided, this will create the Cycle, the requested Nombre de Niveaux
-        and for the current academic year will create corresponding Classe objects.
-        """
         payload = request.data.copy()
         type_cycle_id = payload.pop("type_cycle", None)
         nombre_niveaux = payload.pop("nombre_niveaux", None)
@@ -186,14 +165,12 @@ class FiliereViewSet(OptimizedModelViewSet):
             serializer.is_valid(raise_exception=True)
             filiere = serializer.save()
 
-            # If a cycle type is provided, create a Cycle and auto-create Niveaux/Classes
             if type_cycle_id:
                 try:
                     type_cycle = CycleGlobal.objects.get(pk=type_cycle_id)
                 except CycleGlobal.DoesNotExist:
                     raise ValidationError({"type_cycle": "Type de cycle introuvable"})
 
-                # Create the Cycle and name it after the CycleGlobal
                 cycle = Cycle.objects.create(filiere=filiere, type_cycle=type_cycle, nom=type_cycle.nom, ordre=1)
 
                 try:
@@ -223,6 +200,80 @@ class FiliereViewSet(OptimizedModelViewSet):
     @action(detail=True, methods=["get"], url_path="cycles")
     def cycles(self, request, pk=None):
         cycles = Cycle.objects.filter(filiere=self.get_object())
+        serializer = CycleSerializer(cycles, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["get"], url_path="specialites")
+    def specialites(self, request, pk=None):
+        specialites = Specialite.objects.filter(filiere=self.get_object())
+        serializer = SpecialiteSerializer(specialites, many=True)
+        return Response(serializer.data)
+
+
+class SpecialiteViewSet(OptimizedModelViewSet):
+    queryset = Specialite.objects.select_related("filiere", "filiere__departement", "filiere__departement__universite_tutelle").all()
+    serializer_class = SpecialiteSerializer
+    filterset_fields = ("filiere", "filiere__departement")
+    search_fields = ("nom", "code", "description", "filiere__nom")
+    ordering = ("filiere__nom", "nom")
+
+    def get_permissions(self):
+        if self.action in ["list", "retrieve", "cycles"]:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+    def create(self, request, *args, **kwargs):
+        payload = request.data.copy()
+        type_cycle_id = payload.pop("type_cycle", None)
+        nombre_niveaux = payload.pop("nombre_niveaux", None)
+
+        with transaction.atomic():
+            serializer = self.get_serializer(data=payload)
+            serializer.is_valid(raise_exception=True)
+            specialite = serializer.save()
+
+            if type_cycle_id:
+                try:
+                    type_cycle = CycleGlobal.objects.get(pk=type_cycle_id)
+                except CycleGlobal.DoesNotExist:
+                    raise ValidationError({"type_cycle": "Type de cycle introuvable"})
+
+                cycle = Cycle.objects.create(
+                    specialite=specialite,
+                    filiere=specialite.filiere,
+                    type_cycle=type_cycle,
+                    nom=type_cycle.nom,
+                    ordre=1
+                )
+
+                try:
+                    levels = int(nombre_niveaux) if nombre_niveaux is not None else 0
+                except (ValueError, TypeError):
+                    levels = 0
+
+                all_annees = AnneeAcademique.objects.all()
+
+                for i in range(1, levels + 1):
+                    niveau_nom = f"{type_cycle.nom} {i}"
+                    niveau = Niveau.objects.create(cycle=cycle, nom=niveau_nom, ordre=i)
+
+                    for annee in all_annees:
+                        classe_nom = f"{specialite.nom} {type_cycle.nom} {i} ({annee.libelle})"
+                        Classe.objects.update_or_create(
+                            specialite=specialite,
+                            filiere=specialite.filiere,
+                            cycle=cycle,
+                            niveau=niveau,
+                            annee_academique=annee,
+                            defaults={"nom": classe_nom}
+                        )
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(detail=True, methods=["get"], url_path="cycles")
+    def cycles(self, request, pk=None):
+        cycles = Cycle.objects.filter(specialite=self.get_object())
         serializer = CycleSerializer(cycles, many=True)
         return Response(serializer.data)
 
@@ -304,6 +355,11 @@ class ClasseViewSet(OptimizedModelViewSet):
         "annee_academique__libelle",
     )
     ordering = ("annee_academique__libelle", "nom")
+
+    def get_permissions(self):
+        if self.action in ["list", "retrieve"]:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
 
 
 class SemestreViewSet(OptimizedModelViewSet):
@@ -462,9 +518,11 @@ class AcademicEmploiDuTempsViewSet(OptimizedModelViewSet):
 class PreInscriptionViewSet(OptimizedModelViewSet):
     from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
     parser_classes = [MultiPartParser, FormParser, JSONParser]
-    queryset = PreInscription.objects.select_related("filiere_souhaitee", "cycle_souhaite", "niveau_souhaite", "annee_academique").prefetch_related("documents").all()
+    queryset = PreInscription.objects.select_related(
+        "filiere_souhaitee", "specialite_souhaitee", "cycle_souhaite", "niveau_souhaite", "classe_souhaitee", "annee_academique"
+    ).prefetch_related("documents").all()
     serializer_class = PreInscriptionSerializer
-    filterset_fields = ("statut", "filiere_souhaitee", "cycle_souhaite", "niveau_souhaite")
+    filterset_fields = ("statut", "filiere_souhaitee", "specialite_souhaitee", "cycle_souhaite", "niveau_souhaite", "classe_souhaitee")
 
     def get_permissions(self):
         if self.action == "create":
@@ -516,6 +574,40 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
 
         try:
             with transaction.atomic():
+                # Process newly uploaded documents during validation
+                new_files = request.FILES.getlist("nouveaux_documents")
+                if hasattr(request.data, "getlist"):
+                    new_types = request.data.getlist("types_documents")
+                else:
+                    new_types = request.data.get("types_documents", [])
+                    if not isinstance(new_types, list):
+                        new_types = [new_types] if new_types is not None else []
+
+                for idx, file_obj in enumerate(new_files):
+                    type_doc = new_types[idx] if idx < len(new_types) else "Document"
+                    PreInscriptionDocument.objects.create(
+                        pre_inscription=preinscription,
+                        fichier=file_obj,
+                        type_document=type_doc,
+                    )
+
+                # Process specific document fields if passed individually
+                doc_map = {
+                    "photo": "Photo d'identité",
+                    "acte_naissance": "Acte de naissance",
+                    "cni": "CNI / Passeport",
+                    "bulletin": "Bulletin",
+                    "diplome": "Diplôme",
+                }
+                for f_name, t_label in doc_map.items():
+                    f_obj = request.FILES.get(f_name)
+                    if f_obj:
+                        PreInscriptionDocument.objects.create(
+                            pre_inscription=preinscription,
+                            fichier=f_obj,
+                            type_document=t_label,
+                        )
+
                 preinscription.statut = "APPROUVEE"
                 preinscription.save()
 
@@ -546,6 +638,19 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                         etudiant=etudiant,
                         fichier=doc.fichier,
                         type_document=doc.type_document,
+                    )
+
+                justificatif_paiement = (
+                    request.FILES.get("justificatif_paiement")
+                    or request.FILES.get("recu_paiement")
+                    or request.FILES.get("justificatif")
+                )
+
+                if justificatif_paiement:
+                    EtudiantDocument.objects.create(
+                        etudiant=etudiant,
+                        fichier=justificatif_paiement,
+                        type_document="Reçu de paiement",
                     )
 
                 year = None
@@ -596,8 +701,140 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                         existing_inscription.annee_academique_ref = year
                     existing_inscription.save()
 
-                montant_inscription = Decimal(str(request.data.get("montant_inscription_verse", "0") or "0"))
-                montant_formation = Decimal(str(request.data.get("montant_formation_verse", "0") or "0"))
+                def _safe_decimal(val, default="0"):
+                    try:
+                        return Decimal(str(val or default).strip() or "0")
+                    except Exception:
+                        return Decimal("0")
+
+                montant_inscription = _safe_decimal(request.data.get("montant_inscription_verse"))
+                montant_formation = _safe_decimal(request.data.get("montant_formation_verse"))
+
+                # Process discount / scholarship
+                type_reduction = str(request.data.get("type_reduction", "NONE") or "NONE").upper()
+                montant_reduction_input = _safe_decimal(request.data.get("montant_reduction"))
+                bourse_code = str(request.data.get("bourse_code", "") or "").strip()
+                motif_reduction = str(request.data.get("motif_reduction", "") or "").strip()
+
+                bourse_obj = None
+                montant_discount = Decimal("0")
+                target_reduction = "FORMATION"
+
+                if type_reduction == "BOURSE":
+                    if not bourse_code:
+                        return Response({"error": "Le code de la bourse est requis."}, status=400)
+                    from paiements.models import Bourse
+                    bourse_obj = Bourse.objects.filter(code__iexact=bourse_code).first()
+                    if not bourse_obj:
+                        return Response({"error": f"La bourse avec le code '{bourse_code}' est introuvable."}, status=400)
+                    if bourse_obj.est_utilisee:
+                        return Response({"error": f"La bourse '{bourse_code}' a déjà été utilisée."}, status=400)
+                    montant_discount = Decimal(str(bourse_obj.montant))
+                    target_reduction = "FORMATION"
+                elif type_reduction == "PERCENT_10":
+                    target_reduction = "FORMATION"
+                    if classe:
+                        from paiements.models import Frais
+                        try:
+                            schedule = classe.payment_schedule
+                            total_formation = schedule.total_amount
+                        except Exception:
+                            total_formation = Frais.objects.filter(
+                                classe=classe
+                            ).exclude(libelle__icontains="inscription").aggregate(
+                                total=models.Sum("montant")
+                            )["total"] or Decimal("0")
+                        montant_discount = (Decimal(str(total_formation)) * Decimal("0.10")).quantize(Decimal("0.01"))
+                elif type_reduction in ("LIBRE_FORMATION", "LIBRE"):
+                    type_reduction = "LIBRE_FORMATION"
+                    target_reduction = "FORMATION"
+                    montant_discount = montant_reduction_input
+                elif type_reduction == "LIBRE_INSCRIPTION":
+                    target_reduction = "INSCRIPTION"
+                    montant_discount = montant_reduction_input
+
+                # If reduction is on formation fees and classe is set, adjust student payment schedule starting from last tranche backwards
+                if target_reduction == "FORMATION" and montant_discount > 0 and classe:
+                    from paiements.models import StudentPaymentPlan, StudentPaymentInstallment
+
+                    base_tranches = []
+                    if hasattr(classe, "payment_schedule") and classe.payment_schedule.installments.exists():
+                        for inst in classe.payment_schedule.installments.all().order_by("order"):
+                            base_tranches.append({
+                                "order": inst.order,
+                                "label": inst.label,
+                                "due_date": inst.due_date,
+                                "amount_due": Decimal(str(inst.amount_due)),
+                            })
+                    elif hasattr(preinscription.filiere_souhaitee, "payment_policy") and preinscription.filiere_souhaitee.payment_policy.four_installments.exists():
+                        for t in preinscription.filiere_souhaitee.payment_policy.four_installments.all().order_by("order"):
+                            base_tranches.append({
+                                "order": t.order,
+                                "label": t.label or f"Tranche {t.order}",
+                                "due_date": t.due_date,
+                                "amount_due": Decimal(str(t.amount_due)),
+                            })
+
+                    if base_tranches:
+                        # Deduct from last tranche backwards
+                        base_tranches.sort(key=lambda x: x["order"], reverse=True)
+                        rem = montant_discount
+                        for tr in base_tranches:
+                            if rem <= 0:
+                                break
+                            deduct = min(tr["amount_due"], rem)
+                            tr["amount_due"] -= deduct
+                            rem -= deduct
+
+                        base_tranches.sort(key=lambda x: x["order"])
+                        new_total = sum(tr["amount_due"] for tr in base_tranches)
+
+                        StudentPaymentPlan.objects.filter(
+                            etudiant=etudiant, filiere=preinscription.filiere_souhaitee
+                        ).delete()
+
+                        plan = StudentPaymentPlan.objects.create(
+                            etudiant=etudiant,
+                            filiere=preinscription.filiere_souhaitee,
+                            classe=classe,
+                            is_override=True,
+                            mode="CUSTOM",
+                            total_amount=new_total,
+                            status=StudentPaymentPlan.STATUS_ACTIVE,
+                        )
+                        inst_objs = [
+                            StudentPaymentInstallment(
+                                plan=plan,
+                                order=tr["order"],
+                                label=tr["label"],
+                                due_date=tr["due_date"],
+                                amount_due=tr["amount_due"],
+                                amount_paid=Decimal("0"),
+                            )
+                            for tr in base_tranches
+                        ]
+                        for inst_obj in inst_objs:
+                            inst_obj.refresh_status()
+                        StudentPaymentInstallment.objects.bulk_create(inst_objs)
+
+                # Mark bourse as used if applicable
+                if bourse_obj:
+                    bourse_obj.est_utilisee = True
+                    bourse_obj.etudiant_beneficiaire = etudiant
+                    bourse_obj.date_utilisation = timezone.now()
+                    bourse_obj.save()
+
+                # Record ReductionEtudiant
+                if type_reduction != "NONE":
+                    from paiements.models import ReductionEtudiant
+                    ReductionEtudiant.objects.create(
+                        etudiant=etudiant,
+                        type_reduction=type_reduction,
+                        target=target_reduction,
+                        montant_reduction=montant_discount,
+                        bourse=bourse_obj,
+                        motif=motif_reduction,
+                    )
 
                 if classe and (montant_inscription > 0 or montant_formation > 0):
                     frais_inscription = Frais.objects.filter(
@@ -615,6 +852,7 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                             paiement_type="INSCRIPTION",
                             montant_paye=montant_inscription,
                             moyen_paiement="cash",
+                            justificatif=justificatif_paiement,
                         )
 
                     if montant_formation > 0 and frais_formation:
@@ -625,6 +863,7 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                             paiement_type="FORMATION",
                             montant_paye=montant_formation,
                             moyen_paiement="cash",
+                            justificatif=justificatif_paiement,
                         )
 
                 preinscription.delete()
@@ -633,6 +872,7 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                     "message": "Pré-inscription approuvée et synchronisée.",
                     "etudiant_id": etudiant.id,
                 })
+
         except IntegrityError as e:
             traceback.print_exc()
             error_str = str(e)

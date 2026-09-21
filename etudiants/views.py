@@ -214,21 +214,44 @@ class StudentPortalViewSet(viewsets.ReadOnlyModelViewSet):
         if not etudiant:
             return Response({"error": "Profil introuvable"}, status=404)
         
-        # On renvoie les données pour que le front génère la carte
+        year_id = get_current_academic_year_id()
+        if year_id:
+            derniere_ins = etudiant.inscriptions.filter(annee_academique_ref_id=year_id).first()
+        else:
+            derniere_ins = etudiant.inscriptions.order_by("-date_inscription").first()
+
+        photo = etudiant.documents.filter(type_document__icontains="Photo").first()
+        photo_url = request.build_absolute_uri(photo.fichier.url) if photo else None
+
         data = {
+            "id": etudiant.id,
             "nom": etudiant.nom,
             "matricule": etudiant.matricule,
-            "filiere": etudiant.filiere.nom if etudiant.filiere else "N/A",
-            "photo": None,
             "date_naissance": etudiant.date_naissance,
+            "contact": etudiant.contact,
+            "email": etudiant.email,
+            "statut": etudiant.statut,
+            "filiere": etudiant.filiere.nom if etudiant.filiere else (derniere_ins.filiere.nom if derniere_ins and derniere_ins.filiere else "N/A"),
+            "filiere_details": {
+                "id": etudiant.filiere.id if etudiant.filiere else None,
+                "nom": etudiant.filiere.nom if etudiant.filiere else None,
+                "code": getattr(etudiant.filiere, "code", ""),
+            } if etudiant.filiere else None,
+            "niveau": derniere_ins.niveau.nom if (derniere_ins and derniere_ins.niveau) else "N/A",
+            "classe": derniere_ins.classe.nom if (derniere_ins and derniere_ins.classe) else "N/A",
+            "annee_academique": derniere_ins.annee_academique if derniere_ins else "2025/2026",
+            "photo": photo_url,
+            "documents": [
+                {
+                    "type_document": doc.type_document,
+                    "fichier": request.build_absolute_uri(doc.fichier.url) if doc.fichier else None
+                } for doc in etudiant.documents.all()
+            ],
             "etablissement": "IFPT SMART CAMPUS",
         }
-        # On cherche si une photo est uploadée
-        photo = etudiant.documents.filter(type_document__icontains="Photo").first()
-        if photo:
-            data["photo"] = request.build_absolute_uri(photo.fichier.url)
             
         return Response(data)
+
 
     @action(detail=False, methods=["get"], url_path="certificat-scolarite")
     def certificat_scolarite(self, request):

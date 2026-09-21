@@ -1,20 +1,38 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
-from academique.models import Filiere, Cycle, Niveau, Classe, AnneeAcademique
+from academique.models import Filiere, Specialite, Cycle, Niveau, Classe, AnneeAcademique
 
 
 def _get_target_annees():
     return AnneeAcademique.objects.all()
 
 
-def _create_classes_for(filiere, cycle, niveau):
+def _create_classes_for(cycle, niveau, filiere=None, specialite=None):
+    if not filiere and cycle.filiere:
+        filiere = cycle.filiere
+    if not specialite and cycle.specialite:
+        specialite = cycle.specialite
+        if not filiere and specialite:
+            filiere = specialite.filiere
     années = _get_target_annees()
     created = []
     for an in années:
-        exists = Classe.objects.filter(filiere=filiere, cycle=cycle, niveau=niveau, annee_academique=an).exists()
+        exists = Classe.objects.filter(
+            specialite=specialite,
+            filiere=filiere,
+            cycle=cycle,
+            niveau=niveau,
+            annee_academique=an
+        ).exists()
         if not exists:
-            classe = Classe.objects.create(filiere=filiere, cycle=cycle, niveau=niveau, annee_academique=an)
+            classe = Classe.objects.create(
+                specialite=specialite,
+                filiere=filiere,
+                cycle=cycle,
+                niveau=niveau,
+                annee_academique=an
+            )
             created.append(classe)
     return created
 
@@ -23,9 +41,8 @@ def _create_classes_for(filiere, cycle, niveau):
 def on_cycle_created(sender, instance, created, **kwargs):
     if not created:
         return
-    filiere = instance.filiere
     for niveau in instance.niveaux.all():
-        _create_classes_for(filiere, instance, niveau)
+        _create_classes_for(instance, niveau, filiere=instance.filiere, specialite=instance.specialite)
 
 
 @receiver(post_save, sender=Niveau)
@@ -33,8 +50,16 @@ def on_niveau_created(sender, instance, created, **kwargs):
     if not created:
         return
     cycle = instance.cycle
-    filiere = cycle.filiere
-    _create_classes_for(filiere, cycle, instance)
+    _create_classes_for(cycle, instance, filiere=cycle.filiere, specialite=cycle.specialite)
+
+
+@receiver(post_save, sender=Specialite)
+def on_specialite_created(sender, instance, created, **kwargs):
+    if not created:
+        return
+    for cycle in instance.cycles.all():
+        for niveau in cycle.niveaux.all():
+            _create_classes_for(cycle, niveau, filiere=instance.filiere, specialite=instance)
 
 
 @receiver(post_save, sender=Filiere)
@@ -43,7 +68,7 @@ def on_filiere_created(sender, instance, created, **kwargs):
         return
     for cycle in instance.cycles.all():
         for niveau in cycle.niveaux.all():
-            _create_classes_for(instance, cycle, niveau)
+            _create_classes_for(cycle, niveau, filiere=instance)
 
 
 @receiver(post_save, sender=AnneeAcademique)
@@ -57,10 +82,12 @@ def on_annee_academique_created(sender, instance, created, **kwargs):
     if not source_annee:
         return
     for classe in Classe.objects.filter(annee_academique=source_annee):
+        prefix = classe.specialite.nom if classe.specialite else (classe.filiere.nom if classe.filiere else "")
         Classe.objects.get_or_create(
+            specialite=classe.specialite,
             filiere=classe.filiere,
             cycle=classe.cycle,
             niveau=classe.niveau,
             annee_academique=instance,
-            defaults={"nom": f"{classe.filiere.nom} {classe.cycle.nom} {classe.niveau.ordre} ({instance.libelle})"},
+            defaults={"nom": f"{prefix} {classe.cycle.nom} {classe.niveau.ordre} ({instance.libelle})"},
         )

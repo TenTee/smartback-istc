@@ -18,6 +18,7 @@ from .models import (
     Epreuve,
     Evaluation,
     Filiere,
+    Specialite,
     Niveau,
     ParametresGlobaux,
     PreInscription,
@@ -135,16 +136,51 @@ class FiliereSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.Mode
     departement_nom = serializers.CharField(source="departement.nom", read_only=True)
     universite_tutelle_nom = serializers.CharField(source="departement.universite_tutelle.nom", read_only=True)
     name = serializers.CharField(source="nom", read_only=True)
-    # Affiche le nom du cycle (type de cycle) associé à la filière s'il y en a un
-    cycle_nom = serializers.SerializerMethodField()
-    # Nombre de niveaux créés sous cette filière
-    nombre_niveaux = serializers.SerializerMethodField()
 
     class Meta:
         model = Filiere
         fields = [
             "id",
             "departement",
+            "departement_nom",
+            "universite_tutelle_nom",
+            "nom",
+            "name",
+            "code",
+            "responsable_nom",
+            "description",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+            "departement_nom",
+            "universite_tutelle_nom",
+            "name",
+        ]
+
+    def validate(self, attrs):
+        return self.validate_scoped_name(attrs)
+
+
+class SpecialiteSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelSerializer):
+    model_class = Specialite
+    parent_field = "filiere"
+    filiere_nom = serializers.CharField(source="filiere.nom", read_only=True)
+    departement_nom = serializers.CharField(source="filiere.departement.nom", read_only=True)
+    universite_tutelle_nom = serializers.CharField(source="filiere.departement.universite_tutelle.nom", read_only=True)
+    name = serializers.CharField(source="nom", read_only=True)
+    cycle_nom = serializers.SerializerMethodField()
+    nombre_niveaux = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Specialite
+        fields = [
+            "id",
+            "filiere",
+            "filiere_nom",
             "departement_nom",
             "universite_tutelle_nom",
             "nom",
@@ -161,6 +197,7 @@ class FiliereSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.Mode
             "id",
             "created_at",
             "updated_at",
+            "filiere_nom",
             "departement_nom",
             "universite_tutelle_nom",
             "name",
@@ -169,16 +206,14 @@ class FiliereSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.Mode
         ]
 
     def get_cycle_nom(self, obj):
-        """Retourne le nom du premier cycle de la filière (cycle principal)."""
         cycle = obj.cycles.select_related("type_cycle").first()
         if cycle:
             return cycle.type_cycle.nom if cycle.type_cycle else cycle.nom
         return None
 
     def get_nombre_niveaux(self, obj):
-        """Retourne le nombre total de niveaux rattachés à cette filière."""
         from .models import Niveau
-        return Niveau.objects.filter(cycle__filiere=obj).count()
+        return Niveau.objects.filter(cycle__specialite=obj).count()
 
     def validate(self, attrs):
         return self.validate_scoped_name(attrs)
@@ -188,6 +223,7 @@ class CycleSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelS
     model_class = Cycle
     parent_field = "filiere"
     filiere_nom = serializers.CharField(source="filiere.nom", read_only=True)
+    specialite_nom = serializers.CharField(source="specialite.nom", read_only=True)
     departement_nom = serializers.CharField(source="filiere.departement.nom", read_only=True)
     levels_count = serializers.SerializerMethodField()
     name = serializers.CharField(source="nom", read_only=True)
@@ -198,6 +234,8 @@ class CycleSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelS
             "id",
             "filiere",
             "filiere_nom",
+            "specialite",
+            "specialite_nom",
             "type_cycle",
             "departement_nom",
             "nom",
@@ -214,6 +252,7 @@ class CycleSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelS
             "created_at",
             "updated_at",
             "filiere_nom",
+            "specialite_nom",
             "departement_nom",
             "levels_count",
             "name",
@@ -232,6 +271,8 @@ class LevelSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelS
     cycle_nom = serializers.CharField(source="cycle.nom", read_only=True)
     filiere_id = serializers.IntegerField(source="cycle.filiere_id", read_only=True)
     filiere_nom = serializers.CharField(source="cycle.filiere.nom", read_only=True)
+    specialite_id = serializers.IntegerField(source="cycle.specialite_id", read_only=True)
+    specialite_nom = serializers.CharField(source="cycle.specialite.nom", read_only=True)
     name = serializers.CharField(source="nom", read_only=True)
 
     class Meta:
@@ -240,6 +281,8 @@ class LevelSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelS
             "id",
             "filiere_id",
             "filiere_nom",
+            "specialite_id",
+            "specialite_nom",
             "cycle",
             "cycle_nom",
             "nom",
@@ -252,6 +295,8 @@ class LevelSerializer(CaseInsensitiveUniqueWithinParentMixin, serializers.ModelS
             "id",
             "filiere_id",
             "filiere_nom",
+            "specialite_id",
+            "specialite_nom",
             "cycle_nom",
             "name",
         ]
@@ -383,6 +428,7 @@ class AnneeAcademiqueSerializer(serializers.ModelSerializer):
 
 class ClasseSerializer(serializers.ModelSerializer):
     filiere_nom = serializers.CharField(source="filiere.nom", read_only=True)
+    specialite_nom = serializers.CharField(source="specialite.nom", read_only=True)
     cycle_nom = serializers.CharField(source="cycle.nom", read_only=True)
     niveau_nom = serializers.CharField(source="niveau.nom", read_only=True)
     annee_academique_libelle = serializers.CharField(source="annee_academique.libelle", read_only=True)
@@ -394,6 +440,8 @@ class ClasseSerializer(serializers.ModelSerializer):
             "id",
             "filiere",
             "filiere_nom",
+            "specialite",
+            "specialite_nom",
             "cycle",
             "cycle_nom",
             "niveau",
@@ -414,6 +462,7 @@ class ClasseSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "filiere_nom",
+            "specialite_nom",
             "cycle_nom",
             "niveau_nom",
             "annee_academique_libelle",
@@ -599,8 +648,10 @@ class PreInscriptionDocumentSerializer(serializers.ModelSerializer):
 
 class PreInscriptionSerializer(serializers.ModelSerializer):
     filiere_souhaitee_nom = serializers.CharField(source="filiere_souhaitee.nom", read_only=True)
+    specialite_souhaitee_nom = serializers.CharField(source="specialite_souhaitee.nom", read_only=True)
     cycle_souhaite_nom = serializers.CharField(source="cycle_souhaite.nom", read_only=True)
     niveau_souhaite_nom = serializers.CharField(source="niveau_souhaite.nom", read_only=True)
+    classe_souhaitee_nom = serializers.CharField(source="classe_souhaitee.nom", read_only=True)
     name = serializers.CharField(read_only=True)
     documents = PreInscriptionDocumentSerializer(many=True, read_only=True)
 
@@ -617,15 +668,23 @@ class PreInscriptionSerializer(serializers.ModelSerializer):
             "date_naissance",
             "filiere_souhaitee",
             "filiere_souhaitee_nom",
+            "specialite_souhaitee",
+            "specialite_souhaitee_nom",
             "cycle_souhaite",
             "cycle_souhaite_nom",
             "niveau_souhaite",
             "niveau_souhaite_nom",
+            "classe_souhaitee",
+            "classe_souhaitee_nom",
             "statut",
             "bulletin",
             "message",
             "nom_parent",
             "whatsapp_parent",
+            "relation_parent1",
+            "nom_parent2",
+            "whatsapp_parent2",
+            "relation_parent2",
             "documents",
             "created_at",
             "updated_at",
@@ -636,8 +695,10 @@ class PreInscriptionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "filiere_souhaitee_nom",
+            "specialite_souhaitee_nom",
             "cycle_souhaite_nom",
             "niveau_souhaite_nom",
+            "classe_souhaitee_nom",
             "documents",
         ]
 

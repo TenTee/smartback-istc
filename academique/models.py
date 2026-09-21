@@ -173,6 +173,24 @@ class Filiere(NamedDescriptionModel):
         return self.nom
 
 
+class Specialite(NamedDescriptionModel):
+    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="specialites")
+    nom = models.CharField(max_length=200)
+    responsable_nom = models.CharField(max_length=255, blank=True)
+    code = models.CharField(max_length=50, blank=True)
+
+    class Meta:
+        verbose_name = "Spécialité"
+        verbose_name_plural = "Spécialités"
+        ordering = ["filiere__nom", "nom"]
+        constraints = [
+            models.UniqueConstraint(fields=["filiere", "nom"], name="unique_specialite_per_filiere"),
+        ]
+
+    def __str__(self):
+        return self.nom
+
+
 class CycleGlobal(NamedDescriptionModel):
     nom = models.CharField(max_length=100, unique=True, help_text="Ex: BTS, Licence, Master")
     code = models.CharField(max_length=50, blank=True)
@@ -191,7 +209,8 @@ class CycleGlobal(NamedDescriptionModel):
 
 
 class Cycle(NamedDescriptionModel):
-    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="cycles")
+    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="cycles", null=True, blank=True)
+    specialite = models.ForeignKey(Specialite, on_delete=models.CASCADE, related_name="cycles", null=True, blank=True)
     type_cycle = models.ForeignKey(CycleGlobal, on_delete=models.PROTECT, related_name="cycles_acad", null=True, blank=True)
     nom = models.CharField(max_length=100, blank=True) # Will be auto-filled from type_cycle if empty
     code = models.CharField(max_length=50, blank=True)
@@ -200,18 +219,18 @@ class Cycle(NamedDescriptionModel):
     class Meta:
         verbose_name = "Cycle"
         verbose_name_plural = "Cycles"
-        ordering = ["filiere__nom", "ordre", "nom"]
-        constraints = [
-            models.UniqueConstraint(fields=["filiere", "type_cycle"], name="unique_cycle_type_per_filiere"),
-        ]
+        ordering = ["ordre", "nom"]
 
     def save(self, *args, **kwargs):
         if self.type_cycle and not self.nom:
             self.nom = self.type_cycle.nom
+        if self.specialite and not self.filiere:
+            self.filiere = self.specialite.filiere
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.filiere.nom} - {self.nom}"
+        parent = self.specialite.nom if self.specialite else (self.filiere.nom if self.filiere else "")
+        return f"{parent} - {self.nom}"
 
 
 class Niveau(NamedDescriptionModel):
@@ -231,14 +250,28 @@ class Niveau(NamedDescriptionModel):
 
     @property
     def filiere(self):
-        return self.cycle.filiere
+        if self.cycle:
+            return self.cycle.filiere or (self.cycle.specialite.filiere if self.cycle.specialite else None)
+        return None
+
+    @property
+    def specialite(self):
+        return self.cycle.specialite if self.cycle else None
 
     def __str__(self):
-        return f"{self.cycle.filiere.nom} - {self.cycle.nom} - {self.nom}"
+        parent_name = ""
+        if self.cycle:
+            if self.cycle.specialite:
+                parent_name = self.cycle.specialite.nom
+            elif self.cycle.filiere:
+                parent_name = self.cycle.filiere.nom
+        cycle_name = self.cycle.nom if self.cycle else ""
+        return f"{parent_name} - {cycle_name} - {self.nom}"
 
 
 class CourseAssignment(TimeStampedModel):
-    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="course_assignments")
+    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="course_assignments", null=True, blank=True)
+    specialite = models.ForeignKey(Specialite, on_delete=models.CASCADE, related_name="course_assignments", null=True, blank=True)
     cycle = models.ForeignKey(Cycle, on_delete=models.CASCADE, related_name="course_assignments")
     niveau = models.ForeignKey(Niveau, on_delete=models.CASCADE, related_name="course_assignments")
     module = models.ForeignKey(Module, on_delete=models.CASCADE, related_name="course_assignments")
@@ -246,24 +279,24 @@ class CourseAssignment(TimeStampedModel):
     class Meta:
         verbose_name = "Attribution de Cours"
         verbose_name_plural = "Attributions de Cours"
-        ordering = ["filiere__nom", "cycle__ordre", "niveau__nom", "module__nom"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["filiere", "cycle", "niveau", "module"],
-                name="unique_course_assignment_per_path",
-            ),
-        ]
+        ordering = ["cycle__ordre", "niveau__nom", "module__nom"]
 
     def __str__(self):
-        return f"{self.filiere.nom} / {self.cycle.nom} / {self.niveau.nom} / {self.module.nom}"
+        parent = self.specialite.nom if self.specialite else (self.filiere.nom if self.filiere else "")
+        return f"{parent} / {self.cycle.nom} / {self.niveau.nom} / {self.module.nom}"
 
     def clean(self):
-        if self.cycle_id and self.cycle.filiere_id != self.filiere_id:
-            raise ValidationError({"cycle": "Le cycle doit appartenir à la filière sélectionnée."})
+        if self.cycle_id:
+            if self.filiere_id and self.cycle.filiere_id != self.filiere_id:
+                raise ValidationError({"cycle": "Le cycle doit appartenir à la filière sélectionnée."})
+            if self.specialite_id and self.cycle.specialite_id != self.specialite_id:
+                raise ValidationError({"cycle": "Le cycle doit appartenir à la spécialité sélectionnée."})
         if self.niveau_id and self.niveau.cycle_id != self.cycle_id:
             raise ValidationError({"niveau": "Le niveau doit appartenir au cycle sélectionné."})
 
     def save(self, *args, **kwargs):
+        if self.specialite and not self.filiere:
+            self.filiere = self.specialite.filiere
         self.full_clean()
         super().save(*args, **kwargs)
         self.niveau.modules.add(self.module)
@@ -296,7 +329,8 @@ class AnneeAcademique(NamedDescriptionModel):
 
 
 class Classe(NamedDescriptionModel):
-    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="classes")
+    filiere = models.ForeignKey(Filiere, on_delete=models.CASCADE, related_name="classes", null=True, blank=True)
+    specialite = models.ForeignKey(Specialite, on_delete=models.CASCADE, related_name="classes", null=True, blank=True)
     cycle = models.ForeignKey(Cycle, on_delete=models.CASCADE, related_name="classes")
     niveau = models.ForeignKey(Niveau, on_delete=models.CASCADE, related_name="classes")
     annee_academique = models.ForeignKey(
@@ -310,19 +344,16 @@ class Classe(NamedDescriptionModel):
 
     class Meta:
         ordering = ["annee_academique__libelle", "nom"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["filiere", "niveau", "annee_academique"],
-                name="unique_classe_per_filiere_niveau_annee",
-            ),
-        ]
 
     def __str__(self):
         return self.nom
 
     def save(self, *args, **kwargs):
+        if self.specialite and not self.filiere:
+            self.filiere = self.specialite.filiere
         if not self.nom:
-            self.nom = f"{self.filiere.nom} - {self.niveau.nom} ({self.annee_academique.libelle})"
+            prefix = self.specialite.nom if self.specialite else (self.filiere.nom if self.filiere else "")
+            self.nom = f"{prefix} - {self.niveau.nom} ({self.annee_academique.libelle})"
         super().save(*args, **kwargs)
 
         if not self.modules.exists():
@@ -422,11 +453,17 @@ class PreInscription(NamedDescriptionModel):
     filiere_souhaitee = models.ForeignKey(
         Filiere, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_inscriptions"
     )
+    specialite_souhaitee = models.ForeignKey(
+        Specialite, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_inscriptions"
+    )
     cycle_souhaite = models.ForeignKey(
         Cycle, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_inscriptions"
     )
     niveau_souhaite = models.ForeignKey(
         Niveau, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_inscriptions"
+    )
+    classe_souhaitee = models.ForeignKey(
+        Classe, on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_inscriptions"
     )
     annee_academique = models.ForeignKey(
         "AnneeAcademique", on_delete=models.SET_NULL, null=True, blank=True, related_name="pre_inscriptions"
@@ -435,8 +472,12 @@ class PreInscription(NamedDescriptionModel):
     statut = models.CharField(max_length=20, choices=STATUS_CHOICES, default="EN_ATTENTE")
     bulletin = models.FileField(upload_to="pre_inscriptions/bulletins/", null=True, blank=True)
     message = models.TextField(blank=True)
-    nom_parent = models.CharField(max_length=150, blank=True, verbose_name="Nom du parent")
-    whatsapp_parent = models.CharField(max_length=20, blank=True, verbose_name="WhatsApp du parent")
+    nom_parent = models.CharField(max_length=150, blank=True, verbose_name="Nom du premier parent")
+    whatsapp_parent = models.CharField(max_length=20, blank=True, verbose_name="WhatsApp du premier parent")
+    relation_parent1 = models.CharField(max_length=50, blank=True, verbose_name="Lien parent 1")
+    nom_parent2 = models.CharField(max_length=150, blank=True, verbose_name="Nom du second parent")
+    whatsapp_parent2 = models.CharField(max_length=20, blank=True, verbose_name="WhatsApp du second parent")
+    relation_parent2 = models.CharField(max_length=50, blank=True, verbose_name="Lien parent 2")
 
     class Meta:
         ordering = ["-created_at"]

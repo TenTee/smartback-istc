@@ -492,3 +492,61 @@ def add_months_with_day(start_date, offset, desired_day):
     last_day = calendar.monthrange(year, month)[1]
     day = min(desired_day, last_day)
     return start_date.replace(year=year, month=month, day=day)
+
+
+class Bourse(models.Model):
+    code = models.CharField(max_length=50, unique=True, help_text="Code unique de la bourse")
+    description = models.CharField(max_length=255, blank=True, null=True)
+    montant = models.DecimalField(max_digits=10, decimal_places=2)
+    est_utilisee = models.BooleanField(default=False)
+    etudiant_beneficiaire = models.ForeignKey(
+        Etudiant,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="bourses",
+    )
+    date_utilisation = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.code} - {self.montant} FCFA ({'Utilisée' if self.est_utilisee else 'Disponible'})"
+
+
+class ReductionEtudiant(models.Model):
+    TYPE_CHOICES = [
+        ("NONE", "Aucune"),
+        ("PERCENT_10", "Réduction 10% (Formation)"),
+        ("LIBRE_FORMATION", "Réduction libre (Formation)"),
+        ("LIBRE_INSCRIPTION", "Réduction libre (Inscription)"),
+        ("BOURSE", "Bourse d'études"),
+    ]
+
+    etudiant = models.ForeignKey(
+        Etudiant,
+        on_delete=models.CASCADE,
+        related_name="reductions",
+    )
+    type_reduction = models.CharField(max_length=30, choices=TYPE_CHOICES, default="NONE")
+    target = models.CharField(max_length=20, default="FORMATION")
+    montant_reduction = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    bourse = models.ForeignKey(
+        Bourse,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reductions",
+    )
+    motif = models.CharField(max_length=255, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Réduction {self.etudiant.nom} - {self.get_type_reduction_display()} ({self.montant_reduction} FCFA)"
+

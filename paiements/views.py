@@ -3,7 +3,8 @@ from django.db import models
 from django.db.models import Max, Sum, Value, DecimalField, Count
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from rest_framework import generics
+from rest_framework import generics, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -11,24 +12,29 @@ from etudiants.models import Etudiant
 from academique.middleware import get_current_academic_year_id
 
 from .models import (
+    Bourse,
     ClassePaymentInstallment,
     ClassePaymentSchedule,
     FilierePaymentPolicy,
     Frais,
     Paiement,
+    ReductionEtudiant,
     StudentPaymentInstallment,
     StudentPaymentPlan,
 )
 from .serializers import (
+    BourseSerializer,
     ClassePaymentScheduleSerializer,
     FilierePaymentPolicySerializer,
     PaiementAggregatedSerializer,
     PaiementSerializer,
     PaymentAlertSerializer,
+    ReductionEtudiantSerializer,
     ResolvedScheduleSerializer,
     StudentPaymentPlanSerializer,
 )
 from .schedule_resolver import compute_student_retard
+
 
 
 class PaiementListCreate(generics.ListCreateAPIView):
@@ -75,7 +81,7 @@ class PaiementAggregated(APIView):
 
             classe = derniere_inscription.classe if derniere_inscription else None
 
-            # Calculer les frais dûs
+            # Calculer les frais dûs (en tenant compte d'un éventuel échéancier personnalisé / réduction)
             montant_du_inscription = Decimal("0")
             montant_du_formation = Decimal("0")
 
@@ -86,6 +92,20 @@ class PaiementAggregated(APIView):
 
                 montant_du_inscription = frais_inscription.aggregate(total=Coalesce(Sum("montant"), Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))))["total"]
                 montant_du_formation = frais_formation.aggregate(total=Coalesce(Sum("montant"), Value(0, output_field=DecimalField(max_digits=10, decimal_places=2))))["total"]
+
+            # Vérifier si l'étudiant a un plan personnalisé (ex: réduction sur la formation)
+            personal_plan = StudentPaymentPlan.objects.filter(
+                etudiant=etudiant,
+                status=StudentPaymentPlan.STATUS_ACTIVE,
+                is_override=True,
+            ).first()
+            if personal_plan:
+                montant_du_formation = Decimal(str(personal_plan.total_amount))
+
+            # Vérifier les réductions enregistrées pour l'étudiant
+            reduction = ReductionEtudiant.objects.filter(etudiant=etudiant).select_related("bourse").order_by("-created_at").first()
+            if reduction and reduction.target == "INSCRIPTION" and reduction.montant_reduction > 0:
+                montant_du_inscription = max(Decimal("0"), montant_du_inscription - Decimal(str(reduction.montant_reduction)))
 
             # Calculer les paiements effectués (inclure ceux avec et sans frais)
             paiements = Paiement.objects.filter(etudiant=etudiant)
@@ -128,10 +148,15 @@ class PaiementAggregated(APIView):
                     "montant_paye_formation_total": float(montant_paye_formation_total),
                     "solde_restant_formation": solde_formation,
                     "derniere_date": derniere_date,
+                    "type_reduction": reduction.type_reduction if reduction else "NONE",
+                    "type_reduction_display": reduction.get_type_reduction_display() if reduction else "Aucune",
+                    "montant_reduction": float(reduction.montant_reduction) if reduction else 0.0,
+                    "bourse_code": reduction.bourse.code if (reduction and reduction.bourse) else "",
                 }
             )
 
         serializer = PaiementAggregatedSerializer(results, many=True)
+
         return Response(serializer.data)
 
 
@@ -631,9 +656,43 @@ class StudentScheduleOverrideView(APIView):
             etudiant=etudiant, classe=inscription.classe, is_override=True
         ).delete()
 
-        if deleted_count == 0:
-            return Response({"message": "Aucun echeancier personnalise a supprimer"}, status=status.HTTP_404_NOT_FOUND)
-
         result = compute_student_retard(etudiant, inscription.classe)
         serializer = ResolvedScheduleSerializer(result)
         return Response(serializer.data)
+
+
+class BourseViewSet(viewsets.ModelViewSet):
+    queryset = Bourse.objects.select_related("etudiant_beneficiaire").all()
+    serializer_class = BourseSerializer
+    search_fields = ["code", "description", "etudiant_beneficiaire__nom"]
+
+    @action(detail=False, methods=["get"], url_path="check")
+    def check_code(self, request):
+        code = request.query_params.get("code", "").strip()
+        if not code:
+            return Response({"valid": False, "message": "Code de bourse requis."}, status=status.HTTP_400_BAD_REQUEST)
+
+        bourse = Bourse.objects.filter(code__iexact=code).first()
+        if not bourse:
+            return Response({"valid": False, "message": "Code de bourse inexistant."}, status=status.HTTP_404_NOT_FOUND)
+
+        if bourse.est_utilisee:
+            benef = f" (Utilisée par {bourse.etudiant_beneficiaire.nom})" if bourse.etudiant_beneficiaire else ""
+            return Response({
+                "valid": False,
+                "message": f"Cette bourse a déjà été utilisée{benef}.",
+                "bourse": BourseSerializer(bourse).data,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "valid": True,
+            "message": "Bourse valide et disponible.",
+            "bourse": BourseSerializer(bourse).data,
+        })
+
+
+class ReductionEtudiantViewSet(viewsets.ModelViewSet):
+    queryset = ReductionEtudiant.objects.select_related("etudiant", "bourse").all()
+    serializer_class = ReductionEtudiantSerializer
+    filterset_fields = ["etudiant", "type_reduction", "target"]
+
