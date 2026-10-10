@@ -27,8 +27,17 @@ SECRET_KEY = os.getenv(
     'django-insecure-%)nyb*o-kkh67_e)5!jvgbcu&m#49j!c=s9&@!1636^x*9%nmo'
 )
 DEBUG = os.getenv('DEBUG', 'True').strip().lower() in {'1', 'true', 'yes', 'on'}
+# Domaines de production inclus par défaut : sans eux, un serveur dont le .env ne définit
+# pas ALLOWED_HOSTS refuse toutes les requêtes (« DisallowedHost »).
+DEFAULT_ALLOWED_HOSTS = (
+    'localhost,127.0.0.1,'
+    'istc.tenteeglobal.com,smart.tenteeglobal.com'
+)
 ALLOWED_HOSTS = [
-    host.strip() for host in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host.strip()
+    host.strip() for host in os.getenv('ALLOWED_HOSTS', DEFAULT_ALLOWED_HOSTS).split(',') if host.strip()
+]
+CSRF_TRUSTED_ORIGINS = [
+    f"https://{host}" for host in ALLOWED_HOSTS if host not in ('localhost', '127.0.0.1', '*')
 ]
 
 # -------------------------
