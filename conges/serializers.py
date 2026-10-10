@@ -25,3 +25,17 @@ class CongeSerializer(serializers.ModelSerializer):
             'personnel',
             'personnel_id'
         ]
+
+    def _save(self, fn, *args):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            return fn(*args)
+        except DjangoValidationError as exc:
+            # Les règles métier du modèle (solde, ancienneté…) renvoyaient une erreur 500.
+            raise serializers.ValidationError(getattr(exc, "message_dict", None) or {"non_field_errors": exc.messages})
+
+    def create(self, validated_data):
+        return self._save(super().create, validated_data)
+
+    def update(self, instance, validated_data):
+        return self._save(super().update, instance, validated_data)

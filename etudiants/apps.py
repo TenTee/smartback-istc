@@ -6,4 +6,4 @@ class EtudiantsConfig(AppConfig):
     name = 'etudiants'
     
     def ready(self):
-        import etudiants.signals  # ✅ Charger les signaux
+        import etudiants.signals  # noqa: F401 — enregistre les signaux

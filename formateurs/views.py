@@ -5,7 +5,12 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db import transaction
 from django.db.models import Q
+from django.utils.crypto import get_random_string
+from rest_framework.exceptions import ValidationError
+
+from users.models import CustomUser
 
 from .models import Formateur, CoursDocument
 from .serializers import FormateurSerializer, FormateurPortalSerializer, CoursDocumentSerializer
@@ -14,43 +19,43 @@ from .serializers import FormateurSerializer, FormateurPortalSerializer, CoursDo
 EPREUVE_TYPES_A_VALIDER = {"EXAMEN", "TP", "RATTRAPAGE"}
 
 
+def _create_formateur_account(formateur):
+    """Crée le compte portail d'un formateur et renvoie (username, mot de passe en clair)."""
+    nom_parts = formateur.nom.lower().replace(" ", "").split()
+    base_username = ".".join(nom_parts) if nom_parts else "formateur"
+    username = f"{base_username}{get_random_string(3, allowed_chars='0123456789')}"
+    raw_password = get_random_string(8)
+
+    user = CustomUser(
+        noms=formateur.nom,
+        prenoms='',
+        email=formateur.email,
+        username=username,
+        role='formateur',
+    )
+    user.set_password(raw_password)
+    user.save()
+
+    formateur.user = user
+    formateur.save(update_fields=['user'])
+    return username, raw_password
+
+
 class FormateurListCreateView(generics.ListCreateAPIView):
     queryset = Formateur.objects.all()
     serializer_class = FormateurSerializer
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ["specialites"]
 
+    @transaction.atomic
     def perform_create(self, serializer):
-        from users.models import CustomUser
-        from django.utils.crypto import get_random_string
-
         email = serializer.validated_data.get('email', '')
-        if email and CustomUser.objects.filter(email=email).exists():
-            from rest_framework.exceptions import ValidationError
+        if email and CustomUser.objects.filter(email__iexact=email).exists():
             raise ValidationError({'email': 'Un compte avec cet email existe déjà.'})
 
         formateur = serializer.save()
-
         if not formateur.user:
-            nom_parts = formateur.nom.lower().replace(" ", "").split()
-            base_username = ".".join(nom_parts) if nom_parts else "formateur"
-            suffix = get_random_string(3, allowed_chars='0123456789')
-            username = f"{base_username}{suffix}"
-
-            raw_password = get_random_string(8)
-            user = CustomUser(
-                noms=formateur.nom,
-                prenoms='',
-                email=formateur.email,
-                username=username,
-                role='formateur',
-            )
-            user.set_password(raw_password)
-            user.save()
-
-            formateur.user = user
-            formateur.save(update_fields=['user'])
-
+            username, raw_password = _create_formateur_account(formateur)
             formateur._generated_username = username
             formateur._generated_password = raw_password
 
@@ -85,10 +90,8 @@ class FormateurGenerateAccountView(generics.GenericAPIView):
     queryset = Formateur.objects.all()
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk=None):
-        from users.models import CustomUser
-        from django.utils.crypto import get_random_string
-
         formateur = self.get_object()
         if formateur.user:
             return Response(
@@ -96,31 +99,13 @@ class FormateurGenerateAccountView(generics.GenericAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if formateur.email and CustomUser.objects.filter(email=formateur.email).exists():
+        if formateur.email and CustomUser.objects.filter(email__iexact=formateur.email).exists():
             return Response(
                 {'detail': 'Un compte avec cet email existe déjà.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        nom_parts = formateur.nom.lower().replace(" ", "").split()
-        base_username = ".".join(nom_parts) if nom_parts else "formateur"
-        suffix = get_random_string(3, allowed_chars='0123456789')
-        username = f"{base_username}{suffix}"
-        raw_password = get_random_string(8)
-
-        user = CustomUser(
-            noms=formateur.nom,
-            prenoms='',
-            email=formateur.email,
-            username=username,
-            role='formateur',
-        )
-        user.set_password(raw_password)
-        user.save()
-
-        formateur.user = user
-        formateur.save(update_fields=['user'])
-
+        username, raw_password = _create_formateur_account(formateur)
         return Response({
             'username': username,
             'password': raw_password,
@@ -145,6 +130,7 @@ class FormateurPortalViewSet(viewsets.ViewSet):
         from notes.models import Note
         from etudiants.models import Inscription
         from academique.middleware import get_current_academic_year_id
+        from vacations.services import filieres_coordonnees_ids
         import datetime
 
         annee_id = get_current_academic_year_id()
@@ -218,6 +204,7 @@ class FormateurPortalViewSet(viewsets.ViewSet):
                 'email': formateur.email,
                 'type_formateur': formateur.type_formateur,
                 'specialites_nom': [m.nom for m in formateur.specialites.all()],
+                'est_coordonnateur': bool(filieres_coordonnees_ids(request.user)),
             },
             'stats': {
                 'total_classes': len(classe_ids),
@@ -238,11 +225,13 @@ class FormateurPortalViewSet(viewsets.ViewSet):
                 {"detail": "Profil formateur introuvable."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        serializer = FormateurPortalSerializer(formateur, context={'request': request})
-        return Response(serializer.data)
+        from vacations.services import filieres_coordonnees_ids
+        data = dict(FormateurPortalSerializer(formateur, context={'request': request}).data)
+        data['est_coordonnateur'] = bool(filieres_coordonnees_ids(request.user))
+        return Response(data)
 
     def _get_classe_module_pairs(self, formateur, annee_id=None):
-        from academique.models import Affectation, Classe
+        from academique.models import Affectation
         from emploidutemps.models import EmploiDuTemps
 
         pairs = set()
@@ -367,10 +356,10 @@ class FormateurPortalViewSet(viewsets.ViewSet):
                 'classe_id': note.classe.id if note.classe else None,
                 'classe_nom': str(note.classe) if note.classe else '',
                 'evaluation_id': note.evaluation.id if note.evaluation else None,
-                'note_cc': float(note.note_cc) if note.note_cc else None,
-                'note_sn': float(note.note_sn) if note.note_sn else None,
-                'note_rattrapage': float(note.note_rattrapage) if note.note_rattrapage else None,
-                'note_finale': float(note.note_finale) if note.note_finale else None,
+                'note_cc': float(note.note_cc) if note.note_cc is not None else None,
+                'note_sn': float(note.note_sn) if note.note_sn is not None else None,
+                'note_rattrapage': float(note.note_rattrapage) if note.note_rattrapage is not None else None,
+                'note_finale': float(note.note_finale) if note.note_finale is not None else None,
             })
 
         return Response(data)
@@ -388,9 +377,11 @@ class FormateurPortalViewSet(viewsets.ViewSet):
         if not notes_data:
             return Response({"detail": "Aucune note fournie."}, status=400)
 
+        from etudiants.models import Inscription
+
         annee_id = get_current_academic_year_id()
         pairs = self._get_classe_module_pairs(formateur, annee_id=annee_id)
-        allowed_module_ids = set(m.id for _, m in pairs)
+        allowed_pairs = {(c.id, m.id) for c, m in pairs}
 
         created_count = 0
         updated_count = 0
@@ -398,8 +389,19 @@ class FormateurPortalViewSet(viewsets.ViewSet):
 
         for item in notes_data:
             module_id = item.get('module_id')
-            if module_id and int(module_id) not in allowed_module_ids:
-                errors.append(f"Module {module_id} non autorise pour ce formateur.")
+            classe_id = item.get('classe_id')
+            try:
+                pair = (int(classe_id), int(module_id))
+            except (TypeError, ValueError):
+                errors.append("classe_id et module_id sont obligatoires.")
+                continue
+            # Auparavant seul le module était vérifié : un formateur pouvait noter n'importe
+            # quelle classe (et n'importe quel étudiant) dès lors qu'il enseignait ce module ailleurs.
+            if pair not in allowed_pairs:
+                errors.append(f"Module {module_id} / classe {classe_id} non autorisés pour ce formateur.")
+                continue
+            if not Inscription.objects.filter(etudiant_id=item.get('etudiant_id'), classe_id=pair[0]).exists():
+                errors.append(f"L'étudiant {item.get('etudiant_id')} n'est pas inscrit dans cette classe.")
                 continue
 
             try:
@@ -514,8 +516,15 @@ class FormateurPortalViewSet(viewsets.ViewSet):
         niveau_id = request.data.get('niveau_id')
         annee_academique_id = request.data.get('annee_academique_id')
 
+        pairs = self._get_classe_module_pairs(formateur)
+        try:
+            module_id = int(module_id)
+        except (TypeError, ValueError):
+            return Response({"detail": "Module invalide."}, status=400)
+        if module_id not in {m.id for _, m in pairs}:
+            return Response({"detail": "Vous n'enseignez pas ce module."}, status=status.HTTP_403_FORBIDDEN)
+
         if not filiere_id or not niveau_id or not annee_academique_id:
-            pairs = self._get_classe_module_pairs(formateur)
             for classe, module in pairs:
                 if module.id == int(module_id):
                     if not filiere_id:
@@ -592,7 +601,10 @@ class CoursDocumentViewSet(viewsets.ModelViewSet):
         return CoursDocument.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(formateur=self.request.user.formateur_profile)
+        formateur = getattr(self.request.user, 'formateur_profile', None)
+        if formateur is None:
+            raise ValidationError({"detail": "Seul un formateur peut publier un document de cours."})
+        serializer.save(formateur=formateur)
 
     @action(detail=True, methods=['patch'], url_path='toggle-visibilite')
     def toggle_visibilite(self, request, pk=None):
@@ -607,4 +619,22 @@ class CoursDocumentEtudiantView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return CoursDocument.objects.filter(est_visible_etudiants=True)
+        qs = CoursDocument.objects.filter(est_visible_etudiants=True).select_related('module', 'formateur')
+        etudiant = getattr(self.request.user, 'etudiant_profile', None)
+        if etudiant is None:
+            return qs
+        # Un étudiant ne voit que les supports des modules de ses classes
+        # (auparavant : tous les supports de tout l'établissement).
+        from academique.middleware import get_current_academic_year_id
+        from academique.models import Affectation, Classe
+        from emploidutemps.models import EmploiDuTemps
+
+        inscriptions = etudiant.inscriptions.filter(classe__isnull=False)
+        annee_id = get_current_academic_year_id()
+        if annee_id:
+            inscriptions = inscriptions.filter(annee_academique_ref_id=annee_id)
+        classe_ids = list(inscriptions.values_list('classe_id', flat=True))
+        module_ids = set(Classe.modules.through.objects.filter(classe_id__in=classe_ids).values_list('module_id', flat=True))
+        module_ids |= set(Affectation.objects.filter(classe_id__in=classe_ids).values_list('module_id', flat=True))
+        module_ids |= set(EmploiDuTemps.objects.filter(classe_id__in=classe_ids).values_list('module_id', flat=True))
+        return qs.filter(module_id__in=module_ids)

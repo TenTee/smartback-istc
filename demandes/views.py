@@ -1,10 +1,10 @@
-from rest_framework import generics, status
-from rest_framework.decorators import api_view
+from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.contrib.contenttypes.models import ContentType
+from django.db import transaction
 from django.utils import timezone
-from django.db.models import Count, Q
+from django.db.models import Count
 
 from .models import DemandeArticle, LigneDemande
 from .serializers import (
@@ -13,7 +13,7 @@ from .serializers import (
 )
 from formateurs.models import Formateur
 from personnels.models import Personnel
-from inventaires.models import Article, Exemplaire, Mouvement
+from inventaires.models import Exemplaire, Mouvement
 
 
 class DemandeListCreateView(generics.ListCreateAPIView):
@@ -94,34 +94,47 @@ class DemandeLivrerView(APIView):
         if demande.statut != "approuvee":
             return Response({"error": "La demande doit être approuvée avant livraison"}, status=400)
 
+        lignes = list(demande.lignes.select_related("article"))
+
+        def quantite(ligne):
+            # quantite_accordee vaut 0 par défaut (non renseignée) : on retombe alors sur la demande.
+            return ligne.quantite_accordee or ligne.quantite_demandee
+
+        # 1) Vérifier TOUT le stock avant de toucher à quoi que ce soit : auparavant une livraison
+        #    partielle attribuait déjà certaines lignes, et une nouvelle tentative les attribuait
+        #    une seconde fois (double sortie de stock).
         erreurs = []
-        for ligne in demande.lignes.all():
-            qte = ligne.quantite_accordee or ligne.quantite_demandee
-            exemplaires_dispo = Exemplaire.objects.filter(
-                article=ligne.article, statut="en_stock"
-            )[:qte]
-
-            if exemplaires_dispo.count() < qte:
-                erreurs.append(f"{ligne.article.nom}: seulement {exemplaires_dispo.count()}/{qte} disponibles")
-                continue
-
-            for ex in exemplaires_dispo:
-                ex.statut = "en_utilisation"
-                ex.attributaire_content_type = demande.demandeur_content_type
-                ex.attributaire_object_id = demande.demandeur_object_id
-                ex.date_attribution = timezone.localdate()
-                ex.save()
-
-                Mouvement.objects.create(
-                    exemplaire=ex,
-                    type_mouvement="sortie",
-                    motif=f"Livraison demande {demande.reference}",
-                    destinataire_content_type=demande.demandeur_content_type,
-                    destinataire_object_id=demande.demandeur_object_id,
-                )
-
+        for ligne in lignes:
+            qte = quantite(ligne)
+            dispo = Exemplaire.objects.filter(article=ligne.article, statut="en_stock").count()
+            if qte > dispo:
+                erreurs.append(f"{ligne.article.nom}: seulement {dispo}/{qte} disponibles")
         if erreurs:
-            return Response({"warnings": erreurs, "message": "Livraison partielle"}, status=200)
+            return Response({"error": "Stock insuffisant, aucune sortie effectuée.", "warnings": erreurs}, status=400)
+
+        # 2) Livrer l'ensemble de façon atomique
+        with transaction.atomic():
+            for ligne in lignes:
+                qte = quantite(ligne)
+                if qte <= 0:
+                    continue
+                exemplaires = Exemplaire.objects.select_for_update().filter(
+                    article=ligne.article, statut="en_stock"
+                )[:qte]
+                for ex in exemplaires:
+                    ex.statut = "en_utilisation"
+                    ex.attributaire_content_type = demande.demandeur_content_type
+                    ex.attributaire_object_id = demande.demandeur_object_id
+                    ex.date_attribution = timezone.localdate()
+                    ex.save()
+
+                    Mouvement.objects.create(
+                        exemplaire=ex,
+                        type_mouvement="sortie",
+                        motif=f"Livraison demande {demande.reference}",
+                        destinataire_content_type=demande.demandeur_content_type,
+                        destinataire_object_id=demande.demandeur_object_id,
+                    )
 
         demande.statut = "livree"
         demande.date_livraison = timezone.now()
@@ -228,8 +241,6 @@ class DemandesStatsView(APIView):
         delai_moyen = None
         traitees = DemandeArticle.objects.filter(date_traitement__isnull=False)
         if traitees.exists():
-            from django.db.models import Avg
-            from django.db.models.functions import Extract
             delais = [(d.date_traitement - d.date_demande).days for d in traitees[:100]]
             delai_moyen = sum(delais) / len(delais) if delais else 0
 

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from datetime import time
-from .models import EmploiDuTemps, Salle
+from .models import EmploiDuTemps, Salle, EmploiDuTempsDocument
 from academique.models import Filiere, Niveau
 
 class SalleSerializer(serializers.ModelSerializer):
@@ -99,3 +99,50 @@ class EmploiDuTempsSerializer(serializers.ModelSerializer):
                 })
 
         return data
+
+
+class EmploiDuTempsDocumentSerializer(serializers.ModelSerializer):
+    classe_nom = serializers.CharField(source="classe.nom", read_only=True)
+    filiere_nom = serializers.CharField(source="classe.filiere.nom", read_only=True, default="")
+    niveau_nom = serializers.CharField(source="classe.niveau.nom", read_only=True, default="")
+    annee_academique_libelle = serializers.CharField(source="classe.annee_academique.libelle", read_only=True, default="")
+    extension = serializers.ReadOnlyField()
+    is_pdf = serializers.ReadOnlyField()
+    is_image = serializers.ReadOnlyField()
+
+    class Meta:
+        model = EmploiDuTempsDocument
+        fields = [
+            "id",
+            "titre",
+            "classe",
+            "classe_nom",
+            "filiere_nom",
+            "niveau_nom",
+            "annee_academique_libelle",
+            "fichier",
+            "description",
+            "date_effective",
+            "est_actif",
+            "extension",
+            "is_pdf",
+            "is_image",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at"]
+
+    ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp"}
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 Mo
+
+    def validate_fichier(self, value):
+        import os
+        ext = os.path.splitext(value.name)[1].lower().lstrip(".")
+        if ext not in self.ALLOWED_EXTENSIONS:
+            raise serializers.ValidationError(
+                "Format non autorisé. Formats acceptés : PDF, PNG, JPG, JPEG, WEBP."
+            )
+        if value.size > self.MAX_FILE_SIZE:
+            raise serializers.ValidationError("Le fichier dépasse la taille maximale de 10 Mo.")
+        return value
+

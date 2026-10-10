@@ -9,7 +9,6 @@ from drf_spectacular.views import (
     SpectacularRedocView,
     SpectacularSwaggerView,
 )
-from smart_back.pagination import StandardResultsSetPagination
 from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
@@ -35,13 +34,13 @@ urlpatterns = [
     path('api/auth/', include('users.urls')),
     path("api/v2/", include("academique.urls")),
     path('api/files/', include('files.urls')),
-    path('api/admin-api/', include('admin_api.urls')),
     path('api/formateurs/', include('formateurs.urls')),
     path("api/", include("etudiants.urls")),
     path('api/personnels/', include('personnels.urls')),
     path('api/inventaires/', include('inventaires.urls')),
     path("api/", include("paiements.urls")),
     path('api/paie/', include('paie.urls')),
+    path('api/vacations/', include('vacations.urls')),
     path('api/', include('logs.urls')),
     path("api/", include("demandes.urls")),
     path('api/conges/', include('conges.urls')),

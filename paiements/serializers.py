@@ -1,4 +1,3 @@
-from decimal import Decimal
 from rest_framework import serializers
 
 from .models import (
@@ -44,7 +43,6 @@ class FilierePaymentPolicySerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         four_installments = attrs.get("four_installments", self.initial_data.get("four_installments"))
-        filiere = attrs.get("filiere") or getattr(self.instance, "filiere", None)
         four_enabled = attrs.get("four_installments_enabled", getattr(self.instance, "four_installments_enabled", False))
         monthly_enabled = attrs.get("monthly_enabled", getattr(self.instance, "monthly_enabled", False))
 
@@ -135,7 +133,6 @@ class StudentPaymentPlanSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         etudiant = attrs.get("etudiant") or getattr(self.instance, "etudiant", None)
         filiere = attrs.get("filiere") or getattr(self.instance, "filiere", None) or (etudiant.filiere if etudiant else None)
-        mode = attrs.get("mode", getattr(self.instance, "mode", None))
 
         if etudiant and not filiere:
             filiere = etudiant.filiere

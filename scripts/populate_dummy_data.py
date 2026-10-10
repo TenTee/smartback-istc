@@ -1,6 +1,4 @@
-import os
 import random
-from django.utils import timezone
 from academique.models import (
     AnneeAcademique, Semestre, UniversiteTutelle, Departement, Filiere, 
     CycleGlobal, Cycle, Niveau, Classe, Evaluation, CourseAssignment

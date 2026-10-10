@@ -1,7 +1,5 @@
 from rest_framework import serializers
-from django.contrib.contenttypes.models import ContentType
 from .models import DemandeArticle, LigneDemande
-from inventaires.serializers import ArticleListSerializer
 
 
 class LigneDemandeSerializer(serializers.ModelSerializer):

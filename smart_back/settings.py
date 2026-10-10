@@ -22,10 +22,14 @@ load_dotenv(BASE_DIR / '.env')
 # -------------------------
 # Sécurité
 # -------------------------
-SECRET_KEY = 'django-insecure-%)nyb*o-kkh67_e)5!jvgbcu&m#49j!c=s9&@!1636^x*9%nmo'
-DEBUG = True
+SECRET_KEY = os.getenv(
+    'SECRET_KEY',
+    'django-insecure-%)nyb*o-kkh67_e)5!jvgbcu&m#49j!c=s9&@!1636^x*9%nmo'
+)
+DEBUG = os.getenv('DEBUG', 'True').strip().lower() in {'1', 'true', 'yes', 'on'}
 ALLOWED_HOSTS = [
-    '*']
+    host.strip() for host in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host.strip()
+]
 
 # -------------------------
 # Applications
@@ -68,6 +72,7 @@ INSTALLED_APPS = [
     'emploidutemps',
     'notes',
     'assiduite',
+    'vacations',
 ]
 
 # -------------------------
@@ -81,6 +86,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'academique.middleware.ArchiveAcademicYearMiddleware',
+    'users.middleware.PortalAccessMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'academique.middleware.AcademicYearMiddleware',
@@ -106,12 +112,18 @@ TEMPLATES = [
 WSGI_APPLICATION = 'smart_back.wsgi.application'
 
 # -------------------------
-# Base de données (supporte Supabase via DATABASE_URL)
+# Base de données (PostgreSQL local ou distante)
 # -------------------------
 DATABASE_URL = os.environ.get('DATABASE_URL')
+DB_SSL_REQUIRE = os.getenv('DB_SSL_REQUIRE', 'False').strip().lower() in {'1', 'true', 'yes', 'on'}
+
 if DATABASE_URL and dj_database_url:
     DATABASES = {
-        'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600, ssl_require=True)
+        'default': dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,
+            ssl_require=DB_SSL_REQUIRE,
+        )
     }
 else:
     # Fallback local sqlite for development if DATABASE_URL is not provided

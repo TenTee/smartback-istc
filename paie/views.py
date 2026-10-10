@@ -13,12 +13,31 @@ from .models import (
     AvanceSalaire, CampagnePaie, BulletinPaie
 )
 from .serializers import (
-    PaieSerializer, ParametresPaieSerializer, PrimeSerializer,
+    PaieSerializer, PrimeSerializer,
     RetenueSerializer, AvanceSalaireSerializer,
     CampagnePaieSerializer, CampagnePaieListSerializer, BulletinPaieSerializer
 )
 from personnels.models import Personnel
 from formateurs.models import Formateur
+
+
+def _filtrer_type_beneficiaire(qs, request):
+    """
+    Filtre ?beneficiaire_type=personnel|formateur (utilisé par les pages salaires).
+    Le paramètre était envoyé par le frontend mais ignoré : les deux pages mélangeaient
+    personnel et formateurs.
+    """
+    kind = request.query_params.get('beneficiaire_type')
+    models_map = {'personnel': Personnel, 'formateur': Formateur}
+    if kind in models_map:
+        qs = qs.filter(beneficiaire_content_type=ContentType.objects.get_for_model(models_map[kind]))
+    return qs
+
+
+def _bornes_mois(mois, annee):
+    import calendar
+    return date(annee, mois, 1), date(annee, mois, calendar.monthrange(annee, mois)[1])
+
 
 
 class PaieViewSet(viewsets.ModelViewSet):
@@ -31,7 +50,7 @@ class PrimeViewSet(viewsets.ModelViewSet):
     serializer_class = PrimeSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = _filtrer_type_beneficiaire(super().get_queryset(), self.request)
         ct = self.request.query_params.get('content_type')
         obj_id = self.request.query_params.get('object_id')
         if ct and obj_id:
@@ -44,7 +63,7 @@ class RetenueViewSet(viewsets.ModelViewSet):
     serializer_class = RetenueSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = _filtrer_type_beneficiaire(super().get_queryset(), self.request)
         ct = self.request.query_params.get('content_type')
         obj_id = self.request.query_params.get('object_id')
         if ct and obj_id:
@@ -57,7 +76,7 @@ class AvanceSalaireViewSet(viewsets.ModelViewSet):
     serializer_class = AvanceSalaireSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = _filtrer_type_beneficiaire(super().get_queryset(), self.request)
         statut = self.request.query_params.get('statut')
         if statut:
             qs = qs.filter(statut=statut)
@@ -73,7 +92,7 @@ class BulletinPaieViewSet(viewsets.ModelViewSet):
     serializer_class = BulletinPaieSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = _filtrer_type_beneficiaire(super().get_queryset(), self.request)
         mois = self.request.query_params.get('mois')
         annee = self.request.query_params.get('annee')
         campagne = self.request.query_params.get('campagne')
@@ -92,6 +111,14 @@ class BulletinPaieViewSet(viewsets.ModelViewSet):
 
 class CampagnePaieViewSet(viewsets.ModelViewSet):
     queryset = CampagnePaie.objects.all()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        type_beneficiaire = self.request.query_params.get('type_beneficiaire')
+        if type_beneficiaire in ('personnel', 'formateur'):
+            # Une campagne « tous » concerne aussi ce type de bénéficiaire.
+            qs = qs.filter(type_beneficiaire__in=(type_beneficiaire, 'tous'))
+        return qs
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -116,10 +143,19 @@ class GenererCampagneView(APIView):
         mois = int(mois)
         annee = int(annee)
 
+        if not 1 <= mois <= 12:
+            return Response({"error": "Le mois doit être compris entre 1 et 12"}, status=status.HTTP_400_BAD_REQUEST)
+
         camp_type = type_beneficiaire or 'tous'
-        if CampagnePaie.objects.filter(mois=mois, annee=annee, type_beneficiaire=camp_type).exists():
+        if camp_type not in ('tous', 'personnel', 'formateur'):
+            return Response({"error": "type_beneficiaire invalide"}, status=status.HTTP_400_BAD_REQUEST)
+        # Une campagne « tous » et une campagne par type ne doivent pas coexister,
+        # sinon les mêmes personnes seraient payées deux fois pour le mois.
+        conflits = ('tous', 'personnel', 'formateur') if camp_type == 'tous' else (camp_type, 'tous')
+        existante = CampagnePaie.objects.filter(mois=mois, annee=annee, type_beneficiaire__in=conflits).first()
+        if existante:
             return Response(
-                {"error": f"Une campagne {camp_type} existe déjà pour {mois:02d}/{annee}"},
+                {"error": f"Une campagne « {existante.type_beneficiaire} » existe déjà pour {mois:02d}/{annee}"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -129,6 +165,12 @@ class GenererCampagneView(APIView):
             h = entry.get('heures', 0)
             if fid and h:
                 heures_map[int(fid)] = Decimal(str(h))
+
+        # Heures des vacataires : les récapitulatifs mensuels validés (pointage des coordonnateurs)
+        # sont prioritaires sur la saisie manuelle.
+        from vacations.services import heures_validees_par_formateur
+        from vacations.models import RecapMensuel
+        heures_recaps = heures_validees_par_formateur(mois, annee) if type_beneficiaire != 'personnel' else {}
 
         campagne = CampagnePaie.objects.create(mois=mois, annee=annee, type_beneficiaire=camp_type)
 
@@ -149,7 +191,7 @@ class GenererCampagneView(APIView):
             for f in Formateur.objects.all():
                 all_beneficiaires.append((formateur_ct, f))
 
-        today = date.today()
+        debut_mois, fin_mois = _bornes_mois(mois, annee)
 
         for ct, beneficiaire in all_beneficiaires:
             heures = None
@@ -157,33 +199,39 @@ class GenererCampagneView(APIView):
                 taux = Decimal(str(beneficiaire.taux_horaire or 0))
                 if taux <= 0:
                     continue
-                heures = heures_map.get(beneficiaire.id)
-                if not heures or heures <= 0:
-                    continue
-                salaire_base = (taux * heures).quantize(Decimal('0.01'))
+                recap_info = heures_recaps.get(beneficiaire.id)
+                if recap_info and recap_info["heures"] > 0:
+                    heures = recap_info["heures"]
+                    salaire_base = recap_info["montant"].quantize(Decimal('0.01'))
+                else:
+                    heures = heures_map.get(beneficiaire.id)
+                    if not heures or heures <= 0:
+                        continue
+                    salaire_base = (taux * heures).quantize(Decimal('0.01'))
             else:
                 salaire_base = Decimal(str(beneficiaire.salaire or 0))
 
             if salaire_base <= 0:
                 continue
 
+            # Primes/retenues ponctuelles : valables si leur période recoupe le mois payé
+            # (auparavant comparées à la date du jour, faux pour une campagne d'un autre mois).
+            periode = (
+                Q(est_permanente=True)
+                | Q(date_debut__lte=fin_mois, date_fin__gte=debut_mois)
+                | Q(date_debut__lte=fin_mois, date_fin__isnull=True)
+            )
             primes = Prime.objects.filter(
                 beneficiaire_content_type=ct,
                 beneficiaire_object_id=beneficiaire.id,
                 est_active=True,
-            ).filter(
-                Q(est_permanente=True) |
-                Q(date_debut__lte=today, date_fin__gte=today)
-            )
+            ).filter(periode)
 
             retenues = Retenue.objects.filter(
                 beneficiaire_content_type=ct,
                 beneficiaire_object_id=beneficiaire.id,
                 est_active=True,
-            ).filter(
-                Q(est_permanente=True) |
-                Q(date_debut__lte=today, date_fin__gte=today)
-            )
+            ).filter(periode)
 
             detail_primes = [
                 {"type": p.get_type_prime_display(), "libelle": p.libelle, "montant": float(p.montant)}
@@ -224,6 +272,9 @@ class GenererCampagneView(APIView):
                 detail_primes=detail_primes,
                 detail_retenues=detail_retenues,
             )
+
+            if ct == formateur_ct and beneficiaire.id in heures_recaps and heures:
+                RecapMensuel.objects.filter(id__in=heures_recaps[beneficiaire.id]["recap_ids"]).update(bulletin=bulletin)
 
             total_brut += bulletin.salaire_brut
             total_primes_camp += sum_primes
@@ -306,6 +357,9 @@ class PayerCampagneView(APIView):
                         avance.montant_rembourse += montant_retenu
                         avance.save()
                         break
+
+        from vacations.models import RecapMensuel
+        RecapMensuel.objects.filter(bulletin__campagne=campagne).update(statut=RecapMensuel.STATUT_PAYE)
 
         campagne.statut = "payee"
         campagne.date_paiement = timezone.now()
@@ -417,6 +471,9 @@ class StatistiquesPaieView(APIView):
         annee = int(annee)
 
         campagnes = CampagnePaie.objects.filter(annee=annee).order_by('mois')
+        type_beneficiaire = request.query_params.get('type_beneficiaire')
+        if type_beneficiaire in ('personnel', 'formateur'):
+            campagnes = campagnes.filter(type_beneficiaire__in=(type_beneficiaire, 'tous'))
         historique = []
         for c in campagnes:
             historique.append({
@@ -430,9 +487,7 @@ class StatistiquesPaieView(APIView):
                 "statut": c.statut,
             })
 
-        masse_salariale_annuelle = CampagnePaie.objects.filter(
-            annee=annee, statut="payee"
-        ).aggregate(total=Sum('total_net'))['total'] or 0
+        masse_salariale_annuelle = campagnes.filter(statut="payee").aggregate(total=Sum('total_net'))['total'] or 0
 
         avances_en_cours = AvanceSalaire.objects.filter(statut="en_cours")
         total_avances = avances_en_cours.aggregate(total=Sum('montant_total'))['total'] or 0

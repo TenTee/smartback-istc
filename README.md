@@ -1,35 +1,38 @@
-# backend-api_smartcampus
+# SmartCampus — API (Django / DRF)
 
-### Démarrage rapide (dev)
-- **Backend**
-  - Activer le venv: `source venv/bin/activate`
-  - Lancer: `python manage.py migrate && python manage.py runserver`
+## Démarrage (dev)
 
-- **Frontend** (`front-end_smartcampus/frontend`)
-  - Créer `.env` à partir de `.env.example` et ajuster `VITE_API_BASE_URL`
-  - Lancer: `npm install && npm run dev`
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # puis adapter (DATABASE_URL, SECRET_KEY…)
+python manage.py migrate
+python manage.py runserver
+```
 
-### Endpoints “robustes” à utiliser (API v2)
-- **Pré-inscriptions**
-  - `POST /api/v2/pre-inscriptions/` (formulaire public, inclure `filiere_souhaitee` et `niveau_souhaite`)
-  - `POST /api/v2/pre-inscriptions/{id}/approve/` (admin: approuver + synchroniser Etudiant/Inscription)
+Sans `DATABASE_URL`, le projet utilise SQLite (`db.sqlite3`).
+Documentation interactive : `/api/docs/` (Swagger) et `/api/redoc/`.
 
-- **Notes (par formation + niveau)**
-  - `GET /api/v2/notes/export-template-niveau/?filiere=<idFormation>&niveau=<idNiveau>&session=Semestre 1`
-  - `POST /api/v2/notes/import-notes-niveau/` (multipart: `filiere`, `niveau`, `session`, `file`)
-  - `GET /api/v2/notes/par-filiere-niveau/?filiere_id=<idFormation>&session=Semestre 1`
-  - `GET /api/v2/notes/par-module/?module_id=<idModule>&session=Semestre 1`
+Frontend (Next.js) : dossier `../frontend`, variable `NEXT_PUBLIC_API_BASE_URL` (ex. `http://127.0.0.1:8000`), puis `npm install && npm run dev`.
 
-  ### Utiliser Supabase (Postgres) comme base de données
+## Tests
 
-  - Définir la variable d'environnement `DATABASE_URL` avec la connection string fournie par Supabase, par exemple:
-    `postgres://user:password@db.host:5432/database`
-  - Installer les nouvelles dépendances et migrer:
-  ```bash
-  source venv/bin/activate
-  pip install -r requirements.txt
-  python manage.py migrate
-  python manage.py runserver
-  ```
+```bash
+python -m pytest
+```
 
-  Le projet retombera sur SQLite si `DATABASE_URL` n'est pas défini (utile pour le dev local).
+## Contrôle d'accès
+
+- Les comptes **étudiant** et **formateur** n'ont accès qu'aux routes des portails
+  (`users/middleware.py`, liste `PORTAL_RULES`). Toute nouvelle route utilisée par un portail
+  doit y être ajoutée.
+- La gestion des comptes (`/api/auth/`) et l'écriture des rôles sont réservées à l'administration.
+- Une année académique archivée (en-tête `X-Academic-Year`) n'est accessible qu'au super-admin.
+- reCAPTCHA vérifié côté serveur (login, pré-inscription) si `RECAPTCHA_SECRET_KEY` est défini.
+
+## Endpoints principaux
+
+- Pré-inscriptions : `POST /api/v2/pre-inscriptions/` (public), `POST /api/v2/pre-inscriptions/{id}/approve/`
+- Notes : `/api/notes/` (`saisie-groupee/`, `batch-save/`, `valider/`, `me/`, `{id}/releve-notes/`)
+- Portail formateur : `/api/formateurs/portal/…` ; vacations / pointage : `/api/vacations/…`
+- Paie : `/api/paie/…` ; scolarité : `/api/paiements/…`

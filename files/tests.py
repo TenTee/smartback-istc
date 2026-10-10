@@ -1,76 +1,54 @@
 # files/tests.py
-
-import io
+# Tests réécrits : les anciens utilisaient des champs (fichier, uploaded_by, type) et une
+# route (file-list-create) qui n'existent plus dans le modèle et les URLs actuels.
 import pytest
-from rest_framework.test import APIClient
-from django.urls import reverse
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.urls import reverse
+from rest_framework.test import APIClient
+
 from .models import File
 
 User = get_user_model()
 
 
+def _pdf():
+    return SimpleUploadedFile("test.pdf", b"%PDF-1.4 dummy", content_type="application/pdf")
+
+
 @pytest.mark.django_db
 def test_upload_file():
     client = APIClient()
-    # création d'un utilisateur
-    user = User.objects.create_user(username='testuser', email='test@test.com', password='pass')
+    user = User.objects.create_user(username="testuser", email="test@test.com", password="pass")
     client.force_authenticate(user=user)
 
-    # fichier simulé
-    file_data = SimpleUploadedFile("test.pdf", b"dummy content", content_type="application/pdf")
+    response = client.post(reverse("file-upload"), {"file": _pdf()}, format="multipart")
 
-    response = client.post(
-        reverse('file-list-create'),
-        {'fichier': file_data, 'type': 'pdf'},
-        format='multipart'  # important pour upload
-    )
-    assert response.status_code == 201
-    assert File.objects.filter(uploaded_by=user, type='pdf').exists()
+    assert response.status_code == 201, response.data
+    assert File.objects.filter(owner=user, name="test.pdf").exists()
 
 
 @pytest.mark.django_db
 def test_file_download_permission():
     client = APIClient()
-    user = User.objects.create_user(username='user1', email='test@test.com', password='pass')
-    other_user = User.objects.create_user(username='user2', email='other@test.com', password='pass')
+    owner = User.objects.create_user(username="user1", email="u1@test.com", password="pass")
+    other = User.objects.create_user(username="user2", email="u2@test.com", password="pass")
+    file = File.objects.create(file=_pdf(), owner=owner, name="test.pdf")
 
-    client.force_authenticate(user=other_user)
+    client.force_authenticate(user=other)
+    response = client.get(reverse("file-download", args=[file.id]))
 
-    # fichier simulé pour test
-    file_data = SimpleUploadedFile("test.pdf", b"dummy content", content_type="application/pdf")
-    
-    # création du fichier par user1
-    file = File.objects.create(
-        fichier=file_data,
-        uploaded_by=user,
-        type='pdf',
-        size=file_data.size
-    )
-
-    # test que l'autre utilisateur ne peut pas le télécharger
-    response = client.get(reverse('file-download', args=[file.id]))
-    assert response.status_code == 403
+    # Un autre utilisateur ne peut pas télécharger (404 : on ne révèle pas l'existence du fichier)
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db
 def test_file_owner_can_download():
     client = APIClient()
-    user = User.objects.create_user(username='owner', email='owner@test.com', password='pass')
-    client.force_authenticate(user=user)
+    owner = User.objects.create_user(username="owner", email="owner@test.com", password="pass")
+    file = File.objects.create(file=_pdf(), owner=owner, name="test.pdf")
 
-    # fichier simulé
-    file_data = SimpleUploadedFile("test.pdf", b"dummy content", content_type="application/pdf")
+    client.force_authenticate(user=owner)
+    response = client.get(reverse("file-download", args=[file.id]))
 
-    # création du fichier
-    file = File.objects.create(
-        fichier=file_data,
-        uploaded_by=user,
-        type='pdf',
-        size=file_data.size
-    )
-
-    # test que le propriétaire peut le télécharger
-    response = client.get(reverse('file-download', args=[file.id]))
     assert response.status_code == 200

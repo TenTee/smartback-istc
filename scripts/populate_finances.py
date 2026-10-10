@@ -1,7 +1,6 @@
 import random
 from decimal import Decimal
-from datetime import date, timedelta
-from django.utils import timezone
+from datetime import date
 from django.contrib.contenttypes.models import ContentType
 
 from academique.models import Classe, Filiere

@@ -1,17 +1,12 @@
-import io
 import traceback
 from decimal import Decimal
 
-import openpyxl
 from django.db import models, transaction
 from django.http import HttpResponse, FileResponse
 
-from django.conf import settings
 import os
 from django.utils import timezone
-from django.utils.http import content_disposition_header
 from django.utils.text import get_valid_filename
-from openpyxl.styles import Font
 from rest_framework import status, viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -157,8 +152,8 @@ class FiliereViewSet(OptimizedModelViewSet):
 
     def create(self, request, *args, **kwargs):
         payload = request.data.copy()
-        type_cycle_id = payload.pop("type_cycle", None)
-        nombre_niveaux = payload.pop("nombre_niveaux", None)
+        type_cycle_id = _pop_scalar(payload, "type_cycle")
+        nombre_niveaux = _pop_scalar(payload, "nombre_niveaux")
 
         with transaction.atomic():
             serializer = self.get_serializer(data=payload)
@@ -224,8 +219,8 @@ class SpecialiteViewSet(OptimizedModelViewSet):
 
     def create(self, request, *args, **kwargs):
         payload = request.data.copy()
-        type_cycle_id = payload.pop("type_cycle", None)
-        nombre_niveaux = payload.pop("nombre_niveaux", None)
+        type_cycle_id = _pop_scalar(payload, "type_cycle")
+        nombre_niveaux = _pop_scalar(payload, "nombre_niveaux")
 
         with transaction.atomic():
             serializer = self.get_serializer(data=payload)
@@ -515,6 +510,35 @@ class AcademicEmploiDuTempsViewSet(OptimizedModelViewSet):
     serializer_class = AcademicEmploiDuTempsSerializer
 
 
+class _ApprobationAnnulee(Exception):
+    """Interrompt l'approbation d'une pré-inscription en annulant la transaction."""
+
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.payload = payload
+
+
+ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+
+
+def _verifier_fichier_public(fichier, champ):
+    """Contrôle les fichiers envoyés par le formulaire public de pré-inscription."""
+    ext = os.path.splitext(fichier.name or "")[1].lower()
+    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise ValidationError({champ: "Format non autorisé (PDF, PNG, JPG, JPEG ou WEBP uniquement)."})
+    if fichier.size > MAX_UPLOAD_SIZE:
+        raise ValidationError({champ: "Fichier trop volumineux (10 Mo maximum)."})
+
+
+def _pop_scalar(payload, key):
+    """`QueryDict.pop` renvoie une liste (formulaire multipart) : on ne garde que la valeur."""
+    value = payload.pop(key, None)
+    if isinstance(value, (list, tuple)):
+        value = value[-1] if value else None
+    return value
+
+
 class PreInscriptionViewSet(OptimizedModelViewSet):
     from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
     parser_classes = [MultiPartParser, FormParser, JSONParser]
@@ -530,8 +554,18 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
+        from users.recaptcha import verify_recaptcha
+        verify_recaptcha(self.request)
+
+        for field_name in ("photo", "acte_naissance", "cni", "bulletin"):
+            if self.request.FILES.get(field_name):
+                _verifier_fichier_public(self.request.FILES[field_name], field_name)
+        for diplome in self.request.FILES.getlist("diplomes"):
+            _verifier_fichier_public(diplome, "diplomes")
+
         annee = AnneeAcademique.objects.filter(est_active=True).first()
-        pre_inscription = serializer.save(annee_academique=annee)
+        # Le formulaire est public : le statut n'est jamais choisi par le candidat.
+        pre_inscription = serializer.save(annee_academique=annee, statut="EN_ATTENTE")
 
         document_fields = {
             "photo": "Photo d'identité",
@@ -664,7 +698,7 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                     year = AnneeAcademique.objects.filter(est_active=True).first()
 
                 if not year:
-                    return Response({"error": "Aucune année académique active trouvée. Veuillez en configurer une."}, status=400)
+                    raise _ApprobationAnnulee({"error": "Aucune année académique active trouvée. Veuillez en configurer une."})
 
                 annee_libelle = year.libelle
 
@@ -722,13 +756,13 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
 
                 if type_reduction == "BOURSE":
                     if not bourse_code:
-                        return Response({"error": "Le code de la bourse est requis."}, status=400)
+                        raise _ApprobationAnnulee({"error": "Le code de la bourse est requis."})
                     from paiements.models import Bourse
                     bourse_obj = Bourse.objects.filter(code__iexact=bourse_code).first()
                     if not bourse_obj:
-                        return Response({"error": f"La bourse avec le code '{bourse_code}' est introuvable."}, status=400)
+                        raise _ApprobationAnnulee({"error": f"La bourse avec le code '{bourse_code}' est introuvable."})
                     if bourse_obj.est_utilisee:
-                        return Response({"error": f"La bourse '{bourse_code}' a déjà été utilisée."}, status=400)
+                        raise _ApprobationAnnulee({"error": f"La bourse '{bourse_code}' a déjà été utilisée."})
                     montant_discount = Decimal(str(bourse_obj.montant))
                     target_reduction = "FORMATION"
                 elif type_reduction == "PERCENT_10":
@@ -873,6 +907,9 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
                     "etudiant_id": etudiant.id,
                 })
 
+        except _ApprobationAnnulee as exc:
+            # Toute la transaction est annulée : rien n'est créé ni modifié.
+            return Response(exc.payload, status=400)
         except IntegrityError as e:
             traceback.print_exc()
             error_str = str(e)
@@ -896,11 +933,6 @@ class PreInscriptionViewSet(OptimizedModelViewSet):
             return Response({"error": "Seules les pré-inscriptions en attente peuvent être rejetées."}, status=400)
         preinscription.delete()
         return Response({"message": "Pré-inscription rejetée."})
-
-    def get_permissions(self):
-        if self.action == "create":
-            return [permissions.AllowAny()]
-        return [permissions.IsAuthenticated()]
 
 class EpreuveViewSet(OptimizedModelViewSet):
     queryset = Epreuve.objects.select_related(

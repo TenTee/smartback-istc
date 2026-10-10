@@ -4,6 +4,7 @@ from .models import Etudiant, Inscription
 from notes.models import Note
 from users.models import CustomUser
 
+
 @receiver(post_save, sender=Etudiant)
 def create_user_for_etudiant(sender, instance, created, **kwargs):
     """
@@ -21,6 +22,12 @@ def create_user_for_etudiant(sender, instance, created, **kwargs):
         existing_user = CustomUser.objects.filter(email__iexact=clean_email).first()
 
         if existing_user:
+            # On ne rattache un compte existant que s'il s'agit d'un compte étudiant libre :
+            # auparavant, un étudiant créé avec l'email d'un membre du personnel ou d'un
+            # administrateur récupérait ce compte (et ses droits).
+            already_linked = Etudiant.objects.filter(user=existing_user).exclude(pk=instance.pk).exists()
+            if existing_user.role != "etudiant" or already_linked:
+                return
             user = existing_user
             raw_password = None
         else:
@@ -48,32 +55,26 @@ def create_or_update_notes_on_inscription(sender, instance, created, **kwargs):
     # Modules de la classe
     current_modules = set(instance.classe.modules.all())
     
-    # Sessions à initialiser (on pourrait boucler sur les semestres si besoin)
-    sessions = ["Semestre 1", "Semestre 2"] # Exemple simplifié
+    # Une seule note par module, dans le semestre auquel appartient le module.
+    # (Auparavant une note vide était créée pour CHAQUE semestre : chaque module
+    # apparaissait en double, et la saisie groupée modifiait l'une ou l'autre au hasard.)
+    for module in current_modules:
+        Note.objects.get_or_create(
+            etudiant=instance.etudiant,
+            module=module,
+            classe=instance.classe,
+            evaluation=None,
+            session=module.semestre or "Semestre 1",
+        )
 
-    for session in sessions:
-        # Création des notes manquantes
-        for module in current_modules:
-            Note.objects.get_or_create(
-                etudiant=instance.etudiant,
-                module=module,
-                classe=instance.classe, # Important: on lie à la classe
-                session=session,
-                defaults={
-                    "note_cc": None,
-                    "note_sn": None,
-                    "note_rattrapage": None,
-                    "note_finale": None,
-                }
-            )
-
-    # Nettoyage facultatif : supprimer les notes si l'étudiant change de classe/modules ?
-    # Pour l'instant on se concentre sur la création.
 
 @receiver(post_delete, sender=Etudiant)
-def delete_notes(sender, instance, **kwargs):
+def deactivate_user_on_etudiant_delete(sender, instance, **kwargs):
     """
-    ✅ Lorsqu'un étudiant est supprimé :
-    - Supprimer toutes ses notes
+    Lorsqu'un étudiant est supprimé, son compte portail est désactivé (comme pour
+    les formateurs) : il ne doit plus pouvoir se connecter.
+    Les notes sont supprimées automatiquement (on_delete=CASCADE).
     """
-    Note.objects.filter(etudiant=instance).delete()
+    user_id = instance.user_id
+    if user_id:
+        CustomUser.objects.filter(pk=user_id, role="etudiant").update(is_active=False)

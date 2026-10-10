@@ -1,8 +1,10 @@
 # etudiants/serializers.py
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from rest_framework import serializers
 from .models import Etudiant, EtudiantDocument, Inscription, SanctionDisciplinaire
 from academique.models import Filiere, Cycle, Niveau, Classe, AnneeAcademique
-from academique.serializers import FiliereSerializer, LevelSerializer
+from academique.serializers import FiliereSerializer
 
 # --- Documents liés aux étudiants ---
 class EtudiantDocumentSerializer(serializers.ModelSerializer):
@@ -95,9 +97,24 @@ class EtudiantSerializer(serializers.ModelSerializer):
             "username",
             "initial_password",
         ]
+        # Généré automatiquement à la création du compte : jamais modifiable via l'API.
+        read_only_fields = ["matricule", "initial_password"]
 
     def create(self, validated_data):
-        cycle = validated_data.pop('cycle_id', None)
+        try:
+            return self._create(validated_data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(getattr(exc, "message_dict", None) or {"non_field_errors": exc.messages})
+
+    def update(self, instance, validated_data):
+        try:
+            return self._update(instance, validated_data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(getattr(exc, "message_dict", None) or {"non_field_errors": exc.messages})
+
+    @transaction.atomic
+    def _create(self, validated_data):
+        validated_data.pop('cycle_id', None)
         niveau_id = validated_data.pop('niveau_id', None)
         classe_id = validated_data.pop('classe_id', None)
         annee_academique_ref_id = validated_data.pop('annee_academique_ref_id', None)
@@ -123,10 +140,12 @@ class EtudiantSerializer(serializers.ModelSerializer):
             try:
                 niveau = Niveau.objects.get(pk=niveau_id)
                 annee = AnneeAcademique.objects.filter(est_active=True).first()
+                if annee is None:
+                    raise serializers.ValidationError({"niveau_id": "Aucune année académique active n'est configurée."})
                 Inscription.objects.create(
                     etudiant=etudiant,
                     niveau=niveau,
-                    annee_academique=annee.libelle if annee else "2024-2025",
+                    annee_academique=annee.libelle,
                     annee_academique_ref=annee
                 )
             except Niveau.DoesNotExist:
@@ -134,9 +153,10 @@ class EtudiantSerializer(serializers.ModelSerializer):
 
         return etudiant
 
-    def update(self, instance, validated_data):
+    @transaction.atomic
+    def _update(self, instance, validated_data):
         validated_data.pop('cycle_id', None)
-        niveau_id = validated_data.pop('niveau_id', None)
+        validated_data.pop('niveau_id', None)
         classe_id = validated_data.pop('classe_id', None)
         annee_academique_ref_id = validated_data.pop('annee_academique_ref_id', None)
 
@@ -150,9 +170,11 @@ class EtudiantSerializer(serializers.ModelSerializer):
                     annee = AnneeAcademique.objects.get(pk=annee_academique_ref_id)
                 inscription = instance.inscriptions.filter(annee_academique_ref=annee).first()
                 if inscription:
-                    Inscription.objects.filter(pk=inscription.pk).update(
-                        classe=classe, niveau=classe.niveau
-                    )
+                    # save() (et non update()) : recalcule niveau/année et déclenche la
+                    # création des notes des modules de la nouvelle classe.
+                    inscription.classe = classe
+                    inscription.niveau = classe.niveau
+                    inscription.save()
                 else:
                     Inscription.objects.create(
                         etudiant=instance,

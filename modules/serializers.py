@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import Module
-from academique.models import Filiere, Cycle, Niveau, CourseAssignment
+from academique.models import CourseAssignment
 
 class ModuleSerializer(serializers.ModelSerializer):
     formateurs = serializers.SerializerMethodField()

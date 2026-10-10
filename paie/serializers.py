@@ -1,5 +1,4 @@
 from rest_framework import serializers
-from django.contrib.contenttypes.models import ContentType
 from .models import (
     Paie, ParametresPaie, Prime, Retenue,
     AvanceSalaire, CampagnePaie, BulletinPaie

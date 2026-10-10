@@ -23,60 +23,79 @@ class Conge(models.Model):
         related_name='conges'
     )
 
-    def calculate_working_days(self, start_date, end_date):
+    @staticmethod
+    def calculate_working_days(start_date, end_date):
         """
-        Calcule le nombre de jours ouvrés (exclut Samedi et Dimanche)
-        entre start_date et end_date (inclusif pour le début, exclusif pour la fin).
+        Nombre de jours ouvrés (lundi→vendredi) entre start_date et end_date, BORNES INCLUSES.
+        (Auparavant la date de fin était exclue : un congé du lundi au vendredi comptait
+        4 jours et un congé d'une seule journée était impossible.)
         """
         from datetime import timedelta
-        days = (end_date - start_date).days
-        working_days = 0
-        for i in range(days):
-            current_day = start_date + timedelta(days=i)
-            # Monday=0, Tuesday=1, ..., Saturday=5, Sunday=6
-            if current_day.weekday() < 5:
-                working_days += 1
-        return working_days
+        if not start_date or not end_date or end_date < start_date:
+            return 0
+        days = (end_date - start_date).days + 1
+        return sum(1 for i in range(days) if (start_date + timedelta(days=i)).weekday() < 5)
+
+    @property
+    def jours_ouvres(self):
+        return self.calculate_working_days(self.date_debut, self.date_fin)
+
+    def _jours_deja_decomptes(self):
+        """Jours déjà retirés du solde pour ce congé (s'il était déjà accepté en base)."""
+        if not self.pk:
+            return 0
+        original = Conge.objects.filter(pk=self.pk).first()
+        if original and original.statut == 'accepte':
+            return original.jours_ouvres
+        return 0
 
     def clean(self):
         from django.core.exceptions import ValidationError
-        
+
         if self.date_debut and self.date_fin:
-            if self.date_debut >= self.date_fin:
-                raise ValidationError("La date de début doit être antérieure à la date de fin.")
-            
-            working_days = self.calculate_working_days(self.date_debut, self.date_fin)
-            if working_days <= 0:
+            if self.date_fin < self.date_debut:
+                raise ValidationError("La date de fin doit être postérieure ou égale à la date de début.")
+            if self.jours_ouvres <= 0:
                 raise ValidationError("La période choisie ne contient aucun jour ouvré (uniquement des weekends).")
 
-        if self.personnel:
-            # Check seniority
+        if self.personnel_id and self.statut != 'refuse':
             if not self.personnel.est_eligible_conges:
                 raise ValidationError(f"Ce membre du personnel n'est pas encore éligible aux congés (Ancienneté: {self.personnel.anciennete_annees} an(s)). Il faut au moins 1 an.")
-            
-            # Check balance if creating or approving
-            working_days = self.calculate_working_days(self.date_debut, self.date_fin)
-            if self.personnel.solde_conges_restant < working_days:
-                raise ValidationError(f"Solde de congés insuffisant. Restant: {self.personnel.solde_conges_restant} jour(s) ouvré(s), Demandé: {working_days} jour(s).")
+
+            # Solde disponible pour CE congé : le solde actuel + ce que ce congé a déjà consommé.
+            disponible = self.personnel.solde_conges_restant + self._jours_deja_decomptes()
+            if disponible < self.jours_ouvres:
+                raise ValidationError(f"Solde de congés insuffisant. Restant: {disponible} jour(s) ouvré(s), Demandé: {self.jours_ouvres} jour(s).")
 
     def save(self, *args, **kwargs):
-        # We check the status change to deduct from balance
-        if self.pk:
-            # Refresh from DB to get the current status before save
-            original = Conge.objects.get(pk=self.pk)
-            if original.statut != 'accepte' and self.statut == 'accepte':
-                # Deduct from personnel balance (working days only)
-                working_days = self.calculate_working_days(self.date_debut, self.date_fin)
-                personnel = self.personnel
-                personnel.solde_conges_restant -= working_days
-                personnel.save(update_fields=['solde_conges_restant'])
-        elif self.statut == 'accepte':
-            # Case where a leave is created directly as 'accepted'
-            working_days = self.calculate_working_days(self.date_debut, self.date_fin)
-            personnel = self.personnel
-            personnel.solde_conges_restant -= working_days
-            personnel.save(update_fields=['solde_conges_restant'])
-        
-        # Validate before final save
+        """
+        Correctif : le solde était débité AVANT la validation ; la validation échouait alors
+        (le solde venait d'être réduit) mais le débit restait enregistré, si bien qu'accepter
+        un congé échouait la plupart du temps tout en consommant le solde.
+        Désormais : validation d'abord, puis ajustement du solde dans la même transaction,
+        et le solde est rendu si un congé accepté est refusé, modifié ou supprimé.
+        """
+        from django.db import transaction
+        from personnels.models import Personnel
+
         self.full_clean()
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            deja = self._jours_deja_decomptes()
+            nouveau = self.jours_ouvres if self.statut == 'accepte' else 0
+            delta = nouveau - deja
+            super().save(*args, **kwargs)
+            if delta:
+                personnel = Personnel.objects.select_for_update().get(pk=self.personnel_id)
+                personnel.solde_conges_restant = max(0, personnel.solde_conges_restant - delta)
+                personnel.save(update_fields=['solde_conges_restant'])
+
+    def delete(self, *args, **kwargs):
+        from django.db import transaction
+        from personnels.models import Personnel
+
+        with transaction.atomic():
+            if self.statut == 'accepte' and self.personnel_id:
+                personnel = Personnel.objects.select_for_update().get(pk=self.personnel_id)
+                personnel.solde_conges_restant += self.jours_ouvres
+                personnel.save(update_fields=['solde_conges_restant'])
+            return super().delete(*args, **kwargs)

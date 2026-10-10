@@ -1,7 +1,8 @@
 from decimal import Decimal, InvalidOperation
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
-from django.db.models import Avg, Q
+from django.db.models import Q
 from rest_framework import viewsets, status as http_status
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -9,7 +10,7 @@ from rest_framework.decorators import action
 from .models import Note, Etudiant, Module
 from etudiants.models import Inscription
 from academique.models import (
-    Filiere, Niveau, CourseAssignment, Evaluation, Classe, AnneeAcademique, Affectation,
+    Filiere, Niveau, CourseAssignment, Evaluation, Classe, Affectation,
 )
 from .serializers import NoteSerializer, NoteSummarySerializer, NoteFiliereSerializer
 from academique.middleware import get_current_academic_year_id
@@ -70,6 +71,15 @@ def _notes_visibles(user, base_qs=None):
     return qs
 
 
+def _save_or_400(serializer, **kwargs):
+    """Convertit les erreurs de validation du modèle (plafonds CC/SN) en réponse 400."""
+    from rest_framework.exceptions import ValidationError
+    try:
+        return serializer.save(**kwargs)
+    except DjangoValidationError as exc:
+        raise ValidationError(getattr(exc, "message_dict", None) or {"non_field_errors": exc.messages})
+
+
 class NoteViewSet(viewsets.ModelViewSet):
     queryset = Note.objects.all()
     serializer_class = NoteSerializer
@@ -107,10 +117,7 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         # Une note enregistrée n'est pas visible par l'étudiant tant qu'un
         # administrateur ne l'a pas validée.
-        if not _peut_valider(self.request.user):
-            serializer.save(validee=False)
-        else:
-            serializer.save()
+        _save_or_400(serializer, **({} if _peut_valider(self.request.user) else {"validee": False}))
 
     def perform_update(self, serializer):
         if not user_has_write_access(self.request.user, 'can_manage_pedagogie'):
@@ -118,10 +125,7 @@ class NoteViewSet(viewsets.ModelViewSet):
 
         # Toute modification d'une note la rend à nouveau non visible tant
         # qu'elle n'est pas re-validée par l'administration.
-        if not _peut_valider(self.request.user):
-            serializer.save(validee=False)
-        else:
-            serializer.save()
+        _save_or_400(serializer, **({} if _peut_valider(self.request.user) else {"validee": False}))
 
     def perform_destroy(self, instance):
         if not user_has_write_access(self.request.user, 'can_manage_pedagogie'):
@@ -290,7 +294,9 @@ class NoteViewSet(viewsets.ModelViewSet):
             for n in rows:
                 etudiant_id = n["etudiant_id"]
                 session = n["session"]
-                moyenne_sur_100 = Note.moyenne_etudiant(Etudiant.objects.get(pk=etudiant_id), session=session)
+                moyenne_sur_100 = Note.moyenne_etudiant(
+                    Etudiant.objects.get(pk=etudiant_id), session=session, annee_id=year_id
+                )
                 if moyenne_sur_100 is None:
                     moyenne_sur_100 = 0
 
@@ -539,10 +545,11 @@ class NoteViewSet(viewsets.ModelViewSet):
                 note_query = note_query.filter(evaluation=evaluation)
             else:
                 note_query = note_query.filter(
-                    Q(classe=classe) | Q(classe__isnull=True)
+                    Q(classe=classe) | Q(classe__isnull=True), evaluation__isnull=True
                 )
 
-            note = note_query.first()
+            # Plusieurs semestres possibles : on privilégie celui du module.
+            note = note_query.filter(session=module.semestre).first() or note_query.first()
 
             data.append({
                 "etudiant_id": etudiant.id,
@@ -602,18 +609,21 @@ class NoteViewSet(viewsets.ModelViewSet):
                     filter_kwargs["evaluation_id"] = evaluation_id
                 else:
                     filter_kwargs["classe_id"] = classe_id
+                    filter_kwargs["evaluation__isnull"] = True
 
-                existing = Note.objects.filter(**filter_kwargs).first()
+                candidates = Note.objects.filter(**filter_kwargs)
+                semestre = Module.objects.filter(pk=module_id).values_list("semestre", flat=True).first()
+                # Même règle que la saisie groupée : la note du semestre du module en priorité.
+                existing = (candidates.filter(session=semestre).first() if semestre else None) or candidates.first()
 
                 if existing:
-                    existing.note_cc = note_cc
-                    existing.note_sn = note_sn
-                    existing.note_rattrapage = note_rattrapage
-                    existing.validee = False  # toute nouvelle saisie doit être re-validée
+                    note = existing
+                    note.note_cc = note_cc
+                    note.note_sn = note_sn
+                    note.note_rattrapage = note_rattrapage
+                    note.validee = False  # toute nouvelle saisie doit être re-validée
                     if classe_id:
-                        existing.classe_id = classe_id
-                    existing.save()
-                    results.append(existing)
+                        note.classe_id = classe_id
                 else:
                     note = Note(
                         etudiant_id=etudiant_id,
@@ -624,8 +634,14 @@ class NoteViewSet(viewsets.ModelViewSet):
                         note_sn=note_sn,
                         note_rattrapage=note_rattrapage,
                     )
+                try:
+                    # Le contrôle des plafonds (CC/SN) se fait avant l'écriture : une ligne
+                    # invalide est signalée au lieu de faire échouer toute la requête en 500.
                     note.save()
-                    results.append(note)
+                except DjangoValidationError as exc:
+                    errors.append(f"Ligne {idx+1}: {' '.join(exc.messages)}")
+                    continue
+                results.append(note)
 
         response_data = NoteSerializer(results, many=True).data
         resp = {"message": f"{len(results)} notes enregistrées", "data": response_data}

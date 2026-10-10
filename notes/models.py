@@ -147,6 +147,9 @@ class Note(models.Model):
                 total = 100.0
 
             self.note_finale = Decimal(str(total)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        elif self.note_cc is None and self.note_sn is None and self.note_rattrapage is None:
+            # Toutes les composantes ont été effacées : la note finale ne doit pas rester l'ancienne valeur.
+            self.note_finale = None
         super().save(*args, **kwargs)
 
 
@@ -155,10 +158,9 @@ class Note(models.Model):
         """Retourne la note finale mise à l'échelle sur 20 (à partir de la valeur stockée sur 100)."""
         if self.note_finale is None:
             return None
-        try:
-            return round((float(self.note_finale) / 100.0) * 20.0, 2)
-        except Exception:
-            return None
+        return (Decimal(self.note_finale) * Decimal("20") / Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
 
     @property
     def besoin_rattrapage(self):
@@ -167,7 +169,7 @@ class Note(models.Model):
 
     # ✅ Méthodes globales pour un étudiant
     @classmethod
-    def moyenne_etudiant(cls, etudiant, session=None):
+    def moyenne_etudiant(cls, etudiant, session=None, annee_id=None):
         """
         Calcule la moyenne générale pondérée par coefficients (sur 100).
         - Si session est précisée → moyenne pour ce semestre uniquement.
@@ -176,6 +178,10 @@ class Note(models.Model):
         notes = cls.objects.filter(etudiant=etudiant).select_related("module")
         if session:
             notes = notes.filter(session=session)
+        if annee_id:
+            notes = notes.filter(
+                models.Q(annee_academique_ref_id=annee_id) | models.Q(classe__annee_academique_id=annee_id)
+            )
 
         total_coeff = 0
         total_points = 0.0

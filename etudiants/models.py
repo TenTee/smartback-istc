@@ -3,7 +3,6 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from academique.models import Filiere, Niveau
-from revenus.models import Revenu  
 
 class Etudiant(models.Model):
     STATUT_CHOICES = (

@@ -30,7 +30,12 @@ class ArticleViewSet(viewsets.ModelViewSet):
     def ajouter_stock(self, request, pk=None):
         """Ajouter des exemplaires à un article existant."""
         article = self.get_object()
-        quantite = int(request.data.get("quantite", 1))
+        try:
+            quantite = int(request.data.get("quantite", 1))
+        except (TypeError, ValueError):
+            quantite = 0
+        if not 1 <= quantite <= 1000:
+            return Response({"error": "La quantité doit être un entier entre 1 et 1000."}, status=status.HTTP_400_BAD_REQUEST)
         condition = request.data.get("condition", "neuf")
         localisation = request.data.get("localisation", "")
         date_acquisition = request.data.get("date_acquisition", None)
@@ -87,7 +92,11 @@ class ExemplaireViewSet(viewsets.ModelViewSet):
         localisation = request.data.get("localisation", "")
 
         from django.contrib.contenttypes.models import ContentType
-        ct = ContentType.objects.get(id=content_type_id)
+        if exemplaire.statut != "en_stock":
+            return Response({"error": "Seul un exemplaire en stock peut être attribué."}, status=status.HTTP_400_BAD_REQUEST)
+        ct = ContentType.objects.filter(id=content_type_id).first() if content_type_id else None
+        if ct is None or not object_id:
+            return Response({"error": "Attributaire invalide."}, status=status.HTTP_400_BAD_REQUEST)
 
         exemplaire.attributaire_content_type = ct
         exemplaire.attributaire_object_id = object_id

@@ -64,3 +64,47 @@ class HasRolePermission(BasePermission):
             return level == 'ecriture'
 
         return request.user.is_active
+
+# ---------------------------------------------------------------------------
+# Administration des comptes et des rôles
+# ---------------------------------------------------------------------------
+
+ADMIN_ROLE_CODES = ("admin", "superadmin")
+PORTAL_ROLE_CODES = ("etudiant", "formateur")
+
+
+def is_admin_user(user):
+    """Super-utilisateur ou rôle d'administration générale."""
+    return bool(
+        user
+        and getattr(user, "is_authenticated", False)
+        and (user.is_superuser or getattr(user, "role", "") in ADMIN_ROLE_CODES)
+    )
+
+
+class UserAccountPermission(BasePermission):
+    """
+    Comptes utilisateurs : réservé à l'administration.
+    Exception : un utilisateur peut consulter sa propre fiche (utilisée par l'en-tête de l'application).
+    """
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if is_admin_user(user):
+            return True
+        return getattr(view, "action", None) == "retrieve"
+
+    def has_object_permission(self, request, view, obj):
+        return is_admin_user(request.user) or obj.pk == request.user.pk
+
+
+class RolePermission(BasePermission):
+    """Rôles : lecture pour tout utilisateur connecté, modification réservée à l'administration."""
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        return request.method in SAFE_METHODS or is_admin_user(user)

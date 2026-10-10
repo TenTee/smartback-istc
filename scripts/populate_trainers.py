@@ -1,7 +1,6 @@
 import random
 from formateurs.models import Formateur
 from academique.models import Classe, Affectation
-from modules.models import Module
 
 print("Starting trainer population...")
 

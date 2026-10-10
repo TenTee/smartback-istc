@@ -1,3 +1,5 @@
+import datetime
+
 # pyrefly: ignore [missing-import]
 from django.core.exceptions import ValidationError
 # pyrefly: ignore [missing-import]
@@ -5,9 +7,6 @@ from django.db import models
 
 from formateurs.models import Formateur
 from modules.models import Module
-
-# We remove the import from formations as we will delete that app
-# from formations.models import Formation, Niveau 
 
 class TimeStampedModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
@@ -194,10 +193,12 @@ class Specialite(NamedDescriptionModel):
 class CycleGlobal(NamedDescriptionModel):
     nom = models.CharField(max_length=100, unique=True, help_text="Ex: BTS, Licence, Master")
     code = models.CharField(max_length=50, blank=True)
-    heure_pause_debut = models.TimeField(default="12:00:00")
-    heure_pause_fin = models.TimeField(default="13:00:00")
-    heure_debut_journee = models.TimeField(default="08:00:00")
-    heure_fin_journee = models.TimeField(default="18:00:00")
+    # Valeurs par défaut de type `time` (et non chaîne) : une instance créée sans être
+    # relue en base faisait planter les comparaisons d'horaires de l'emploi du temps.
+    heure_pause_debut = models.TimeField(default=datetime.time(12, 0))
+    heure_pause_fin = models.TimeField(default=datetime.time(13, 0))
+    heure_debut_journee = models.TimeField(default=datetime.time(8, 0))
+    heure_fin_journee = models.TimeField(default=datetime.time(18, 0))
 
     class Meta:
         verbose_name = "Cycle Global"
